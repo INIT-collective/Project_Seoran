@@ -1,6 +1,12 @@
 # Seoran
 
-An open-source browser focused on speed, privacy and customization. Rust shell, Chromium engine, ad and tracker blocking built in. ("Seoran" is a working name.)
+A community-built desktop browser focused on speed, privacy and customization. Rust shell, Chromium engine, ad and tracker blocking built in. Seoran is a working name. The project aims to be open source and the authors are discussing its license. [License decision](https://github.com/INIT-collective/Project_Seoran/issues/4)
+
+## Join the project
+
+Try one Windows build, test one keyboard interaction, or trace one privacy setting. The pinned welcome issue lists the current openings. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1) · [Contribution guide](CONTRIBUTING.md) · [Product roadmap](ROADMAP.md)
+
+中文参与者可以直接在任务下用中文认领，附上测试结果、截图或 PR。[参与入口](https://github.com/INIT-collective/Project_Seoran/issues/1)
 
 ## Status
 
@@ -51,7 +57,7 @@ YouTube serves ads from its own domain, so blocking by domain alone doesn't stop
 
 ## Build and run (Windows)
 
-You need Rust (stable, MSVC toolchain) and the WebView2 runtime, which is built into Windows 10 and 11.
+You need stable Rust with the MSVC toolchain, the Visual Studio C++ build tools with a Windows SDK, and the WebView2 Runtime. If the runtime is missing on your Windows installation, install the Evergreen Runtime. [Microsoft's runtime guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/evergreen-vs-fixed-version)
 
 ```powershell
 cargo run -p seoran
@@ -74,7 +80,8 @@ cargo test --workspace
 Scriptlet behavior test (Node 18 or newer):
 
 ```powershell
-cargo run -q -p shield --example dump_script -- https://www.youtube.com/watch?v=x > $env:TEMP\yt.js; node crates/shield/tests/scriptlets.test.mjs $env:TEMP\yt.js
+cargo run --locked -q -p shield --example dump_script -- 'https://www.youtube.com/watch?v=x' | Out-File -Encoding utf8 "$env:TEMP\yt.js"
+if ($LASTEXITCODE -eq 0) { node crates/shield/tests/scriptlets.test.mjs "$env:TEMP\yt.js" }
 ```
 
 To drive a running Seoran from scripts, start it with a DevTools port:
@@ -103,9 +110,6 @@ node tools/cdp.mjs seoran.chrome "S.shield"
 | Ctrl Shift J | DevTools console |
 | Ctrl Shift C | Pick an element to inspect |
 
-## Next steps (see the roadmap)
+## Next steps
 
-- Replace WebView2 with CEF behind `engine.rs` (needs CMake and the Windows SDK).
-- macOS and Linux builds.
-- Downloads UI, find in page, bookmarks manager.
-- AI sidebar (Phase 3).
+The proposed first preview stays on Windows and adds one everyday improvement chosen from tester reports. The engine discussion compares WebView2, CEF, a Chromium fork and independent-engine options. The roadmap also covers macOS and Linux, customization, privacy and an opt-in AI sidebar. [Roadmap and decision issues](ROADMAP.md)
