@@ -10,32 +10,24 @@ web
 
 ## Users
 
-Young power users: students, developers, gamers and creators who keep the browser open all day. They want ad-free YouTube and a private, fast browser, and they enjoy a browser with personality that they can customize. Many are technical and live on the keyboard.
+People who want to shape their daily desktop browser, from someone rearranging controls without code to a developer building a replacement component. The project welcomes different browsing habits and accessibility needs.
 
 ## Product Purpose
 
-The proposed first audience is people who regularly answer technical questions in Discord or GitHub communities, including mod authors, project maintainers and volunteer support helpers. They can test Seoran on one real question while keeping their usual browser. [Pilot and milestones](ROADMAP.md)
+INIT:// is building a general-purpose desktop browser with deep customization, privacy, security and optional AI integration. The community intends to develop Seoran as open source. The original rights holders still need to choose a project license. [License decision](https://github.com/INIT-collective/Project_Seoran/issues/4)
 
-Seoran is an open-source desktop browser (Rust shell, Chromium engine) focused on customization, privacy, security and AI integration. Success is the team and its users switching to it as their daily browser.
+## Current experiment
 
-## Positioning
-
-The first product bet is a verifiable answer another community member can use. A helper collects public sources and private notes, chooses which excerpts a model may receive, and reviews a cited Markdown draft before sharing it. The recipient can check the evidence in their own browser. Test whether helpers return for a second case before investing in a wider release.
-
-The original brief also proposed these directions:
-
-- **Personality plus privacy:** Brave-level ad and tracker blocking, YouTube included, with an expressive, customizable identity instead of a corporate one.
-- **Two modes (planned):** one browser that switches between Normal browsing and a Markets/News mode.
-- **AI that drives the browser (planned):** an agent that can operate tabs and draft emails, with strict confirmation and safety rules.
+The Windows prototype lets the community test whether tab identity, live pages and trusted browser services can survive changes to the interface. A small declarative component contract is an experiment in independent authoring. The ultimate plugin architecture, engine, visual design and optional workflows remain open for discussion. [Architecture work and open decisions](ROADMAP.md)
 
 ## Operating Context
 
-All-day use on Windows 10 and 11, often in a maximized window beside games, code editors and Discord. Heavy use of YouTube, search and many tabs. Built in the open by a small Discord team (roadmap: Browser Roadmap doc).
+The current prototype runs on Windows. Contributors can use ordinary browsing sessions, keyboard navigation and local test pages to check behavior without disclosing private browsing history.
 
 ## Capabilities and Constraints
 
 - Built today: tabs (session restore, sleeping tabs, drag to reorder, undo close), address bar with history/bookmark/tab suggestions, command palette (Ctrl K), bookmarks, new tab page, settings, Seoran Shield (network blocking, cosmetic filtering, scriptlets, per-site toggle), Seoran DevTools (Elements, Console, Network, Storage, Shield).
-- Planned, not built: AI sidebar and agent, Markets/News mode, CEF engine, macOS and Linux.
+- Open proposals include optional AI assistance, additional platforms and alternative engines.
 - Technical: the browser UI covers the window and is clipped by a native window region to the toolbar plus open panels. Panels must be opaque rectangles (rounded corners allowed); no shadows or translucency outside them. No layout shift or flicker when panels open. UI pages are offline (compiled into the binary): no web fonts or images from the network.
 - Internal pages use the `seoran://` scheme (newtab, settings, devtools).
 

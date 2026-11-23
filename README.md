@@ -1,6 +1,6 @@
 # Seoran
 
-A community-built desktop browser focused on speed, privacy and customization. Rust shell, Chromium engine, ad and tracker blocking built in. Seoran is a working name. The project aims to be open source and the authors are discussing its license. [License decision](https://github.com/INIT-collective/Project_Seoran/issues/4)
+Seoran is a general-purpose desktop browser from INIT:// focused on deep customization, privacy, security and optional AI. The working Windows prototype uses Rust and WebView2 and includes ad and tracker blocking. The project aims to be open source. The original rights holders are discussing licensing for external contributions and distribution. [License decision](https://github.com/INIT-collective/Project_Seoran/issues/4)
 
 ## Join the project
 
@@ -21,7 +21,7 @@ Phase 1 base:
 ```
 app/                  the browser (binary "seoran")
   src/main.rs         browser core: tabs, events, messages between UI and engine
-  src/engine.rs       engine layer: WebView2 today, swappable for CEF or Servo
+  src/engine.rs       Windows engine integration using WebView2
   src/filters.rs      filter-list download, compile and cache (worker thread)
   src/store.rs        settings, history, bookmarks, session (JSON in the profile)
   src/nav.rs          address-bar input to URL, and URL to display text
@@ -110,4 +110,4 @@ node tools/cdp.mjs seoran.chrome "S.shield"
 
 ## Next steps
 
-The first preview stays on Windows. The next product test is helping a community volunteer turn public sources and private troubleshooting notes into a cited answer that a teammate can verify. The roadmap covers a local notebook, optional on-device and API models, and the evidence needed for a community beta. [Product vision and milestones](ROADMAP.md)
+The current architecture experiment tests whether tab controls can be rearranged or replaced while the page stays live. A second contributor will be needed to validate the authoring contract. [Roadmap and open decisions](ROADMAP.md)
