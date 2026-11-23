@@ -7,7 +7,11 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{engine::TabHooks, nav};
+use crate::{
+    engine::TabHooks,
+    nav,
+    store::{Session, SessionTab},
+};
 
 pub(super) struct Tab {
     pub(super) id: u32,
@@ -84,6 +88,31 @@ pub(super) struct Tabs {
 }
 
 impl Tabs {
+    pub(super) fn from_session(session: &Session, mut next_id: impl FnMut() -> u32) -> Self {
+        let mut tabs = Self::default();
+        for saved in &session.tabs {
+            let mut tab = Tab::new(next_id(), &saved.url, &saved.title);
+            const OLD_PREFIX: &str = "http://kite.";
+            if let Some(rest) = tab.url.strip_prefix(OLD_PREFIX)
+                && matches!(rest.split(['/', '?', '#']).next(), Some("newtab" | "settings" | "chrome" | "devtools"))
+            {
+                tab.url.replace_range(..OLD_PREFIX.len(), nav::INTERNAL_PREFIX);
+            }
+            tabs.ordered.push(tab);
+        }
+        if !tabs.ordered.is_empty() {
+            tabs.select(session.active.min(tabs.ordered.len() - 1));
+        }
+        tabs
+    }
+
+    pub(super) fn session(&self) -> Session {
+        Session {
+            tabs: self.ordered.iter().map(|t| SessionTab { url: t.url.clone(), title: t.title.clone() }).collect(),
+            active: self.active_index().unwrap_or(0),
+        }
+    }
+
     pub(super) fn active_id(&self) -> Option<u32> {
         self.active
     }
@@ -137,6 +166,31 @@ mod tests {
         assert_eq!(tab.chrome_state(true), expected);
         expected["sleeping"] = json!(true);
         assert_eq!(tab.chrome_state(false), expected);
+    }
+
+    #[test]
+    fn restore_keeps_external_urls_and_migrates_legacy_internal_pages() {
+        let external = "https://example.org/?ref=http://kite.settings/";
+        let saved = Session {
+            tabs: vec![
+                SessionTab { url: "http://kite.newtab/".into(), title: "Start".into() },
+                SessionTab { url: "http://kite.example.org/".into(), title: "External site".into() },
+                SessionTab { url: external.into(), title: "Bookmark".into() },
+            ],
+            active: 99,
+        };
+        let mut ids = 40..;
+        let mut tabs = Tabs::from_session(&saved, || ids.next().unwrap());
+        assert_eq!(tabs.active_id(), Some(42));
+        assert_eq!(tabs.ordered[0].url, nav::NEW_TAB_URL);
+        assert_eq!(tabs.ordered[1].url, "http://kite.example.org/");
+        assert_eq!(tabs.ordered[2].url, external);
+        tabs.move_to(42, 0);
+        let again = tabs.session();
+        assert_eq!(again.active, 0);
+        assert_eq!(again.tabs[0].url, external);
+        assert_eq!(again.tabs[0].title, "Bookmark");
+        assert_eq!(Tabs::from_session(&Session::default(), || unreachable!()).active_id(), None);
     }
 
     #[test]

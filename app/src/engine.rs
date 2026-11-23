@@ -12,7 +12,7 @@ use std::{
 };
 
 use shield::{ResourceKind, Shield};
-use tao::{event_loop::EventLoopProxy, window::Window};
+use tao::window::Window;
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CallDevToolsProtocolMethodCompletedHandler, ContextMenuRequestedEventHandler,
@@ -33,7 +33,7 @@ use wry::{
     http::{Request, Response, header::CONTENT_TYPE},
 };
 
-use crate::{UserEvent, nav, pages};
+use crate::{EventSender, UserEvent, nav, pages, source_is_live};
 
 /// Script every content page gets: forwards the browser's own keyboard
 /// shortcuts (pages swallow key events, so the shell would never see them)
@@ -56,7 +56,6 @@ pub struct TabHooks {
     pub blocked: Rc<Cell<u32>>,
     pub blocked_log: Rc<RefCell<VecDeque<BlockedRequest>>>,
     pub page_url: Rc<RefCell<String>>,
-    script_ids: Rc<RefCell<Vec<String>>>,
 }
 
 fn now_ms() -> u64 {
@@ -118,7 +117,7 @@ pub fn create_content(
     ctx: &mut WebContext,
     spec: ContentSpec,
     background: (u8, u8, u8, u8),
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &EventSender,
     shield: &Rc<RefCell<Shield>>,
     hooks: &TabHooks,
 ) -> wry::Result<WebView> {
@@ -139,21 +138,21 @@ pub fn create_content(
         .with_initialization_script_for_main_only(CONTENT_JS, true)
         .with_custom_protocol("seoran".into(), |_id, req| serve_internal(req))
         .with_ipc_handler(move |req: Request<String>| {
-            let _ = p_ipc.send_event(UserEvent::Content {
+            p_ipc.send(UserEvent::Content {
                 tab,
                 origin: req.uri().to_string(),
                 body: req.into_body(),
             });
         })
         .with_document_title_changed_handler(move |title| {
-            let _ = p_title.send_event(UserEvent::Title(tab, title));
+            p_title.send(UserEvent::Title(tab, title));
         })
         .with_on_page_load_handler(move |event, url| {
             let started = matches!(event, PageLoadEvent::Started);
-            let _ = p_load.send_event(UserEvent::Load { tab, started, url });
+            p_load.send(UserEvent::Load { tab, started, url });
         })
         .with_new_window_req_handler(move |url, _features| {
-            let _ = p_new.send_event(UserEvent::OpenTab { url, background: false });
+            p_new.send(UserEvent::OpenTab { url, background: false });
             NewWindowResponse::Deny
         })
         .build_as_child(window)?;
@@ -167,7 +166,7 @@ pub fn create_content(
 fn attach_hooks(
     webview: &WebView,
     tab: u32,
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &EventSender,
     shield: &Rc<RefCell<Shield>>,
     hooks: &TabHooks,
 ) -> windows::core::Result<()> {
@@ -199,6 +198,9 @@ fn attach_hooks(
                     let mut raw = PWSTR::null();
                     request.Uri(&mut raw)?;
                     let url = take_pwstr(raw);
+                    if !source_is_live(&proxy.source) {
+                        return Ok(());
+                    }
                     let page = page_url.borrow().clone();
                     if nav::is_internal(&page) || nav::is_internal(&url) {
                         return Ok(());
@@ -224,7 +226,7 @@ fn attach_hooks(
                             log.pop_front();
                         }
                         log.push_back(BlockedRequest { url, kind: kind.as_filter_type(), at_ms: now_ms() });
-                        let _ = proxy.send_event(UserEvent::Blocked(tab));
+                        proxy.send(UserEvent::Blocked(tab));
                     }
                     Ok(())
                 })),
@@ -237,12 +239,15 @@ fn attach_hooks(
         {
             let shield = shield.clone();
             let page_url = hooks.page_url.clone();
-            let script_ids = hooks.script_ids.clone();
+            let script_ids = Rc::new(RefCell::new(Vec::<String>::new()));
             let blocked = hooks.blocked.clone();
             let log = hooks.blocked_log.clone();
             let proxy = proxy.clone();
             core.add_NavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
+                    if !source_is_live(&proxy.source) {
+                        return Ok(());
+                    }
                     let (Some(sender), Some(args)) = (sender, args) else { return Ok(()) };
                     let mut raw = PWSTR::null();
                     args.Uri(&mut raw)?;
@@ -272,7 +277,7 @@ fn attach_hooks(
                             )),
                         )?;
                     }
-                    let _ = proxy.send_event(UserEvent::NavStarting { tab, url });
+                    proxy.send(UserEvent::NavStarting { tab, url });
                     Ok(())
                 })),
                 &mut token,
@@ -287,7 +292,7 @@ fn attach_hooks(
                     if let Some(sender) = sender {
                         let mut raw = PWSTR::null();
                         sender.Source(&mut raw)?;
-                        let _ = proxy.send_event(UserEvent::Url { tab, url: take_pwstr(raw) });
+                        proxy.send(UserEvent::Url { tab, url: take_pwstr(raw) });
                     }
                     Ok(())
                 })),
@@ -298,7 +303,7 @@ fn attach_hooks(
             let proxy = proxy.clone();
             core.add_HistoryChanged(
                 &HistoryChangedEventHandler::create(Box::new(move |_, _| {
-                    let _ = proxy.send_event(UserEvent::History(tab));
+                    proxy.send(UserEvent::History(tab));
                     Ok(())
                 })),
                 &mut token,
@@ -311,7 +316,7 @@ fn attach_hooks(
                     if let Some(sender) = sender.and_then(|s| s.cast::<ICoreWebView2_15>().ok()) {
                         let mut raw = PWSTR::null();
                         sender.FaviconUri(&mut raw)?;
-                        let _ = proxy.send_event(UserEvent::Favicon { tab, url: take_pwstr(raw) });
+                        proxy.send(UserEvent::Favicon { tab, url: take_pwstr(raw) });
                     }
                     Ok(())
                 })),
@@ -325,7 +330,7 @@ fn attach_hooks(
 
 /// F12 / Ctrl+Shift+I/J/C and right-click > Inspect open Seoran DevTools
 /// instead of the engine's own DevTools window.
-fn attach_devtools_hooks(webview: &WebView, tab: u32, proxy: &EventLoopProxy<UserEvent>) -> windows::core::Result<()> {
+fn attach_devtools_hooks(webview: &WebView, tab: u32, proxy: &EventSender) -> windows::core::Result<()> {
     let mut token = 0i64;
     unsafe {
         // Keys are caught here, before the engine's own accelerators run,
@@ -354,7 +359,7 @@ fn attach_devtools_hooks(webview: &WebView, tab: u32, proxy: &EventLoopProxy<Use
                     let mut status = COREWEBVIEW2_PHYSICAL_KEY_STATUS::default();
                     let _ = args.PhysicalKeyStatus(&mut status);
                     if !status.WasKeyDown.as_bool() {
-                        let _ = p.send_event(UserEvent::Action(a.into()));
+                        p.send(UserEvent::Action(a.into()));
                     }
                 }
                 Ok(())
@@ -397,7 +402,7 @@ fn attach_devtools_hooks(webview: &WebView, tab: u32, proxy: &EventLoopProxy<Use
                 let mut t = 0i64;
                 ours.add_CustomItemSelected(
                     &CustomItemSelectedEventHandler::create(Box::new(move |_, _| {
-                        let _ = p2.send_event(UserEvent::Inspect { tab, x: pt.x, y: pt.y });
+                        p2.send(UserEvent::Inspect { tab, x: pt.x, y: pt.y });
                         Ok(())
                     })),
                     &mut t,
@@ -432,11 +437,11 @@ pub fn cdp_call(webview: &WebView, method: &str, params: &str, done: impl FnOnce
 }
 
 /// Forward a DevTools Protocol event from a page to `on_event(json)`.
-pub fn cdp_subscribe(webview: &WebView, event: &str, on_event: impl Fn(String) + 'static) {
+pub fn cdp_subscribe(webview: &WebView, event: &str, on_event: impl Fn(String) + 'static) -> windows::core::Result<()> {
     unsafe {
-        let Ok(receiver) = webview.webview().GetDevToolsProtocolEventReceiver(&HSTRING::from(event)) else { return };
+        let receiver = webview.webview().GetDevToolsProtocolEventReceiver(&HSTRING::from(event))?;
         let mut token = 0i64;
-        let _ = receiver.add_DevToolsProtocolEventReceived(
+        receiver.add_DevToolsProtocolEventReceived(
             &DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_, args| {
                 if let Some(args) = args {
                     let mut raw = PWSTR::null();
@@ -446,7 +451,7 @@ pub fn cdp_subscribe(webview: &WebView, event: &str, on_event: impl Fn(String) +
                 Ok(())
             })),
             &mut token,
-        );
+        )
     }
 }
 

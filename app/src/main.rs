@@ -13,6 +13,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -59,19 +60,62 @@ pub enum UserEvent {
     Inspect { tab: u32, x: i32, y: i32 },
 }
 
+/// Page callbacks may already be on the event queue when their WebView is dropped.
+struct QueuedEvent {
+    source: Option<Weak<()>>,
+    event: UserEvent,
+}
+
+fn source_is_live(source: &Option<Weak<()>>) -> bool {
+    source.as_ref().is_none_or(|owner| owner.strong_count() > 0)
+}
+
+impl QueuedEvent {
+    fn into_live(self) -> Option<UserEvent> {
+        source_is_live(&self.source).then_some(self.event)
+    }
+}
+
+#[derive(Clone)]
+struct EventSender {
+    queue: EventLoopProxy<QueuedEvent>,
+    source: Option<Weak<()>>,
+}
+
+impl EventSender {
+    fn for_page(&self, lifetime: &Arc<()>) -> Self {
+        Self { queue: self.queue.clone(), source: Some(Arc::downgrade(lifetime)) }
+    }
+
+    fn send(&self, event: UserEvent) {
+        let _ = self.queue.send_event(QueuedEvent { source: self.source.clone(), event });
+    }
+}
+
 const DEVTOOLS_MIN: f64 = 140.0;
 
 /// Native resources for one resident tab. Dropping this entry puts its page to sleep.
 struct LivePage {
+    lifetime: Arc<()>,
     view: WebView,
     cdp_subs: HashSet<String>,
+}
+
+fn register_subscription(
+    registered: &mut HashSet<String>,
+    name: String,
+    register: impl FnOnce(&str) -> windows::core::Result<()>,
+) {
+    if !registered.contains(&name) && register(&name).is_ok() {
+        registered.insert(name);
+    }
 }
 
 struct Browser {
     window: Window,
     chrome: WebView,
     ctx: WebContext,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: EventSender,
     shield: Rc<RefCell<Shield>>,
     store: Store,
     tabs: Tabs,
@@ -156,7 +200,7 @@ fn app_icon() -> Option<Icon> {
 }
 
 impl Browser {
-    fn new(target: &EventLoopWindowTarget<UserEvent>, proxy: EventLoopProxy<UserEvent>) -> Self {
+    fn new(target: &EventLoopWindowTarget<QueuedEvent>, proxy: EventSender) -> Self {
         let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
         let profile = base.join("Seoran");
         // The browser used to be called Kite: carry an old profile over once.
@@ -164,6 +208,20 @@ impl Browser {
         if !profile.exists() && old.exists() {
             let _ = std::fs::rename(&old, &profile);
         }
+        let p_filters = proxy.clone();
+        let browser = Self::with_profile(target, proxy, profile.clone(), std::env::args().nth(1));
+        filters::spawn(profile, false, move |c| {
+            p_filters.send(UserEvent::Filters(c));
+        });
+        browser
+    }
+
+    fn with_profile(
+        target: &EventLoopWindowTarget<QueuedEvent>,
+        proxy: EventSender,
+        profile: std::path::PathBuf,
+        arg_url: Option<String>,
+    ) -> Self {
         let store = Store::open(profile.clone());
 
         let window = WindowBuilder::new()
@@ -201,7 +259,7 @@ impl Browser {
             .with_ipc_handler(move |req: Request<String>| {
                 // Only our own UI page may drive the browser.
                 if nav::internal_page(&req.uri().to_string()) == Some("chrome") {
-                    let _ = p_chrome.send_event(UserEvent::Chrome(req.into_body()));
+                    p_chrome.send(UserEvent::Chrome(req.into_body()));
                 }
             })
             .with_navigation_handler(|url| nav::internal_page(&url) == Some("chrome"))
@@ -236,16 +294,9 @@ impl Browser {
         };
 
         // Restore the last session lazily: only the active tab loads now.
-        let arg_url = std::env::args().nth(1);
         let session = browser.store.load_session();
-        if browser.store.settings.restore_session && !session.tabs.is_empty() {
-            for t in &session.tabs {
-                let id = browser.alloc_id();
-                // Internal pages from before the rename.
-                let url = t.url.replace(concat!("http://k", "ite."), nav::INTERNAL_PREFIX);
-                browser.tabs.ordered.push(Tab::new(id, &url, &t.title));
-            }
-            browser.tabs.select(session.active.min(browser.tabs.ordered.len() - 1));
+        if browser.store.settings.restore_session {
+            browser.tabs = Tabs::from_session(&session, || browser.alloc_id());
         }
         if let Some(url) = arg_url {
             let url = nav::resolve_input(&url, &browser.store.settings);
@@ -260,10 +311,6 @@ impl Browser {
         // Show the window only once its views exist: no blank first frame.
         browser.window.set_visible(true);
 
-        let p_filters = proxy;
-        filters::spawn(profile, false, move |c| {
-            let _ = p_filters.send_event(UserEvent::Filters(c));
-        });
         browser
     }
 
@@ -364,11 +411,13 @@ impl Browser {
         }
         let bounds = self.content_bounds();
         let tab = &self.tabs.ordered[i];
+        let lifetime = Arc::new(());
+        let sender = self.proxy.for_page(&lifetime);
         let spec = ContentSpec { tab: tab.id, url: &tab.url, bounds, visible };
         let bg = self.bg();
-        match engine::create_content(&self.window, &mut self.ctx, spec, bg, &self.proxy, &self.shield, &tab.hooks) {
+        match engine::create_content(&self.window, &mut self.ctx, spec, bg, &sender, &self.shield, &tab.hooks) {
             Ok(wv) => {
-                self.pages.insert(tab.id, LivePage { view: wv, cdp_subs: HashSet::new() });
+                self.pages.insert(tab.id, LivePage { lifetime, view: wv, cdp_subs: HashSet::new() });
                 self.tabs.ordered[i].loading = true;
                 // New views stack on top; keep the UI above the page.
                 engine::raise(&self.chrome);
@@ -425,6 +474,7 @@ impl Browser {
     }
 
     fn close_tab(&mut self, id: u32) {
+        let was_active = self.tabs.active_id() == Some(id);
         let Some(tab) = self.tabs.remove(id) else { return };
         self.pages.remove(&id);
         if self.devtools.tab == Some(id) {
@@ -440,7 +490,9 @@ impl Browser {
                 json!({ "text": format!("Closed “{}”", tab.display_title()), "action": "reopen", "actionLabel": "Undo" }),
             );
         }
-        if let Some(next) = self.tabs.active_index() {
+        if !was_active {
+            self.dirty = true;
+        } else if let Some(next) = self.tabs.active_index() {
             self.activate(next);
         } else {
             self.open_tab(nav::NEW_TAB_URL, true);
@@ -691,7 +743,7 @@ impl Browser {
         }
     }
 
-    fn handle_chrome(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>, flow: &mut ControlFlow) {
+    fn handle_chrome(&mut self, body: &str, target: &EventLoopWindowTarget<QueuedEvent>, flow: &mut ControlFlow) {
         let Ok(msg) = serde_json::from_str::<Value>(body) else { return };
         let id = msg["id"].as_u64().map(|v| v as u32);
         match msg["t"].as_str().unwrap_or("") {
@@ -809,7 +861,7 @@ impl Browser {
     fn update_filters(&mut self) {
         let p = self.proxy.clone();
         filters::spawn(self.store.dir().to_path_buf(), true, move |c| {
-            let _ = p.send_event(UserEvent::Filters(c));
+            p.send(UserEvent::Filters(c));
         });
     }
 
@@ -955,8 +1007,9 @@ impl Browser {
         }
     }
 
-    fn handle(&mut self, ev: UserEvent, target: &EventLoopWindowTarget<UserEvent>, flow: &mut ControlFlow) {
-        match ev {
+    fn handle(&mut self, message: QueuedEvent, target: &EventLoopWindowTarget<QueuedEvent>, flow: &mut ControlFlow) {
+        let Some(event) = message.into_live() else { return };
+        match event {
             UserEvent::Chrome(body) => self.handle_chrome(&body, target, flow),
             UserEvent::Content { tab, origin, body } => self.handle_content(tab, &origin, &body),
             UserEvent::Title(tab, title) => {
@@ -1067,7 +1120,7 @@ impl Browser {
             .with_custom_protocol("seoran".into(), |_id, req| engine::serve_internal(req))
             .with_ipc_handler(move |req: Request<String>| {
                 if nav::internal_page(&req.uri().to_string()) == Some("devtools") {
-                    let _ = p.send_event(UserEvent::DevTools(req.into_body()));
+                    p.send(UserEvent::DevTools(req.into_body()));
                 }
             })
             .with_navigation_handler(|url| nav::internal_page(&url) == Some("devtools"))
@@ -1145,9 +1198,9 @@ impl Browser {
         }
     }
 
-    fn devtools_webview(&self) -> Option<&WebView> {
+    fn devtools_page(&self) -> Option<&LivePage> {
         let id = self.devtools.tab?;
-        self.pages.get(&id).map(|page| &page.view)
+        self.pages.get(&id)
     }
 
     fn handle_devtools(&mut self, body: &str) {
@@ -1170,13 +1223,15 @@ impl Browser {
                 let id = msg["id"].as_u64().unwrap_or(0);
                 let method = msg["method"].as_str().unwrap_or("").to_owned();
                 let params = if msg["params"].is_object() { msg["params"].to_string() } else { "{}".into() };
-                let p = self.proxy.clone();
-                match self.devtools_webview() {
-                    Some(wv) => engine::cdp_call(wv, &method, &params, move |ok, json| {
-                        let _ = p.send_event(UserEvent::CdpResult { id, ok, json });
-                    }),
+                match self.devtools_page() {
+                    Some(page) => {
+                        let sender = self.proxy.for_page(&page.lifetime);
+                        engine::cdp_call(&page.view, &method, &params, move |ok, json| {
+                            sender.send(UserEvent::CdpResult { id, ok, json });
+                        });
+                    }
                     None => {
-                        let _ = p.send_event(UserEvent::CdpResult {
+                        self.proxy.send(UserEvent::CdpResult {
                             id,
                             ok: false,
                             json: json!({ "message": "This tab is asleep. Switch to it to wake it up." }).to_string(),
@@ -1192,13 +1247,12 @@ impl Browser {
                     .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 for name in events {
-                    if !page.cdp_subs.insert(name.clone()) {
-                        continue;
-                    }
-                    let p = self.proxy.clone();
-                    let n = name.clone();
-                    engine::cdp_subscribe(&page.view, &name, move |json| {
-                        let _ = p.send_event(UserEvent::CdpEvent { tab: id, name: n.clone(), json });
+                    register_subscription(&mut page.cdp_subs, name, |name| {
+                        let sender = self.proxy.for_page(&page.lifetime);
+                        let event_name = name.to_owned();
+                        engine::cdp_subscribe(&page.view, name, move |json| {
+                            sender.send(UserEvent::CdpEvent { tab: id, name: event_name.clone(), json });
+                        })
                     });
                 }
             }
@@ -1217,7 +1271,7 @@ impl Browser {
             "shieldSite" => {
                 let on = msg["on"].as_bool().unwrap_or(true);
                 let body = json!({ "t": "shieldSite", "on": on }).to_string();
-                self.proxy.send_event(UserEvent::Chrome(body)).ok();
+                self.proxy.send(UserEvent::Chrome(body));
             }
             _ => {}
         }
@@ -1284,11 +1338,7 @@ impl Browser {
     }
 
     fn save_session(&self) {
-        let session = store::Session {
-            tabs: self.tabs.ordered.iter().map(|t| SessionTab { url: t.url.clone(), title: t.title.clone() }).collect(),
-            active: self.tabs.active_index().unwrap_or(0),
-        };
-        self.store.save_session(&session);
+        self.store.save_session(&self.tabs.session());
     }
 
     fn shutdown(&mut self) {
@@ -1300,8 +1350,8 @@ impl Browser {
 }
 
 fn main() {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
+    let event_loop = EventLoopBuilder::<QueuedEvent>::with_user_event().build();
+    let proxy = EventSender { queue: event_loop.create_proxy(), source: None };
     let mut browser: Option<Browser> = Some(Browser::new(&event_loop, proxy));
 
     event_loop.run(move |event, target, flow| {
@@ -1313,7 +1363,7 @@ fn main() {
                     b.maintenance();
                 }
             }
-            Event::UserEvent(ev) => b.handle(ev, target, flow),
+            Event::UserEvent(message) => b.handle(message, target, flow),
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     b.layout();
@@ -1338,3 +1388,6 @@ fn main() {
         }
     });
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
