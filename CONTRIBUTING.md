@@ -1,6 +1,8 @@
 # Contributing to Seoran
 
-A useful first contribution can be a Windows build report, a keyboard walkthrough, a documentation correction or a focused code change. English and 中文 are both welcome. If you have an hour and no development setup, the pinned issue lists ways to help. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1)
+A useful first contribution can be a Windows build report, a keyboard walkthrough, a documentation correction or a focused code change. If you have an hour and no development setup, the pinned issue lists ways to help. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1)
+
+Use English for issues, pull requests, reviews, documentation and community announcements.
 
 ## Pick up a task
 

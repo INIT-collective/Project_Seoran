@@ -6,8 +6,6 @@ A community-built desktop browser focused on speed, privacy and customization. R
 
 Try one Windows build, test one keyboard interaction, or trace one privacy setting. The pinned welcome issue lists the current openings. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1) · [Contribution guide](CONTRIBUTING.md) · [Product roadmap](ROADMAP.md)
 
-中文参与者可以直接在任务下用中文认领，附上测试结果、截图或 PR。[参与入口](https://github.com/INIT-collective/Project_Seoran/issues/1)
-
 ## Status
 
 Phase 1 base:
