@@ -1,19 +1,40 @@
 # Seoran product roadmap
 
-Seoran's first milestone for a user is an ordinary browsing session they choose to repeat tomorrow. Imagine a student researching across several tabs on a Windows laptop. They find a passage, bookmark the page, see what Shield blocked and come back after a restart. A preview tester should be able to do that with the keyboard, tell us where they got stuck and explain where the session was saved.
+## What success looks like
 
-The repository has a working Rust shell using Tao, Wry and WebView2 on Windows. Tabs, session restore, omnibox suggestions, bookmarks, local settings, six frame colours, Shield and built-in DevTools are already present. These are the starting point for a community preview. The priorities below are proposals the team can change with evidence. [Current implementation](README.md) · [Product brief](PRODUCT.md)
+A volunteer is answering a mod compatibility question on Discord. They have a private log containing a local username, two versions of public documentation and a GitHub discussion. In Seoran, they save the useful passages in a named case, resume it tomorrow and give the person asking a short answer with links to the evidence. The recipient can verify that answer in any browser.
 
-## What to build next
+In the proposed finished experience, the helper can ask an on-device model about the log. When they switch to an API model for a harder question, Seoran builds a fresh request from a new question and the public passages they approve. The preview names the provider and shows the exact content. The private log, its URL, derived answers and earlier chat stay on-device. If the local model is unavailable, the helper can still collect evidence and write the reply. The community can share a setup with public references, keyboard preferences and a reply template. Credentials, case notes and browsing history stay with their owner.
 
-| Direction | Smallest useful experiment | Evidence for the next decision |
+The proposed first audience is mod authors, maintainers and volunteer support helpers who routinely work with public and private sources. Ask them to try Seoran for one real question before asking them to change their default browser. Repeated use for that job is the first sign that the project deserves a larger release.
+
+## Starting point
+
+The current Windows prototype has a Rust shell using Tao, Wry and WebView2, tabs and session restore, bookmarks, a command palette, themes, Shield and built-in DevTools. The case notebook, model handoff and community beta below are planned work. [Current implementation](README.md) · [Product brief](PRODUCT.md)
+
+## Milestones and release decisions
+
+| Stage | Deliverable | Evidence to finish |
 | --- | --- | --- |
-| Everyday browsing | A tester tries the research session above. Choose one of in-page find, download status or a searchable bookmark list based on the first point of friction. | A second person completes the task with a keyboard and reproduces the result after restart. [Find](https://github.com/INIT-collective/Project_Seoran/issues/8) · [Downloads](https://github.com/INIT-collective/Project_Seoran/issues/9) · [Bookmarks](https://github.com/INIT-collective/Project_Seoran/issues/10) |
-| Customization | Try one compact toolbar setting on a small laptop. Reuse the current themes and the user's chosen frame colour. | Compare available page space, readability, focus and clipped menus at two window sizes. If people need different workflows, explore saved layouts next. [Compact toolbar](https://github.com/INIT-collective/Project_Seoran/issues/11) |
-| Privacy and security | Trace one visit from the page to history, engine site data and Shield. Show what clearing history actually removes and who updates the engine and filters. | Publish the data inventory and review the boundary around native actions. A private window is a candidate once someone can test isolation across close and restart. [Data inventory](https://github.com/INIT-collective/Project_Seoran/issues/7) · [Trust boundaries](https://github.com/INIT-collective/Project_Seoran/issues/15) |
-| Performance | Collect three cold starts and one ten-tab session on the same test laptop. Record commit, runtime, page fixture and memory before and after tabs sleep. | Use the measurements to judge regressions. Publish the method with the numbers. Volunteer reports keep this possible without adding telemetry. |
-| AI integration | Select a passage, preview the exact text and destination, then ask for a summary. Prototype with a mock provider before choosing local inference or an optional remote service. | Show zero requests while off, a cancel path, and only the approved selection reaching the mock. Tab actions and email drafting need separate decisions about permissions and confirmation. [AI proposal](https://github.com/INIT-collective/Project_Seoran/issues/13) |
-| Markets/News mode | Reopen a small collection of sources in a dedicated workspace and switch back without losing the original tabs. Walk through it with someone who follows a topic daily. | Ask whether it improves their existing bookmark or tab routine. Learn which source and account requirements would come with a live feed. [Mode proposal](https://github.com/INIT-collective/Project_Seoran/issues/14) |
+| M0 · Contributor setup | A contribution guide, Windows build and tests on PRs, and a project license with notices. | A volunteer can claim a task, the guide and checks are merged, and the authors record their license choice. [M0 tracker](https://github.com/INIT-collective/Project_Seoran/milestone/1) |
+| M1 · Windows preview | A second person can run Seoran and finish an ordinary session. In-page find is the first feature candidate. Tester reports can change the choice. | Record the tested commit and Windows/runtime versions. Exercise keyboard navigation, bookmarks, restart and Shield. Review the data inventory and trust boundaries, then record go or hold. [M1 tracker](https://github.com/INIT-collective/Project_Seoran/milestone/2) |
+| M2 · Source notes and handoff | A local case notebook, source-linked excerpts and a reviewed Markdown export usable with AI off. | Reopen a case after restart. A peer using their usual browser verifies two citations. A local-only test excerpt and its metadata are absent from the draft. Compare the effort with the helper's current workflow. [M2 tracker](https://github.com/INIT-collective/Project_Seoran/milestone/3) |
+| M3 · Local and API model choice | One on-device path and one opt-in remote API. Build a fresh request when switching from private chat to a remote provider. | A controlled endpoint records only the confirmed question and approved excerpts. Private text, source URLs, derived answers and chat stay out. Test off, cancel, offline and local-model failure paths. [M3 tracker](https://github.com/INIT-collective/Project_Seoran/milestone/4) |
+| M4 · Community beta decision | A reusable setup for recurring cases and a small opt-in pilot. | Seek 3–5 helpers, at least two voluntary repeat uses within a week, and one independently verified handoff. A beta go also needs passing privacy tests and an owner who rehearsed an update and rollback. Record go, revise or pause, including any shortfall in evidence. [M4 tracker](https://github.com/INIT-collective/Project_Seoran/milestone/5) |
+
+A maintainer can start interviews during the Windows preview. Ask a participant to recall their last real support question and walk through their usual tools. Use public or sanitized material. Record copy-and-paste steps, time to a verifiable reply, and where they expected private material to stay. Build one implementation slice at a time. The live ready queue is the source of current openings. [Baseline study](https://github.com/INIT-collective/Project_Seoran/issues/19) · [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1)
+
+During the pilot, repeat a comparable task in Seoran. Before an API call, ask the helper to identify the recipient and what it will receive. Follow up after a week to learn whether they chose Seoran for another case without a reminder to use it. Voluntary reports are sufficient. The sample and repeat-use targets guide a small team's decision and are not adoption forecasts. If the benefit is confined to clipping and citations, compare an extension before taking on more browser maintenance.
+
+## Longer-term options
+
+| Direction | When to revisit it |
+| --- | --- |
+| Everyday features and customization | If a tester identifies a blocker, choose one of in-page find, download status, bookmark search or toolbar density. Compare keyboard access, restart behavior and the user's existing profile. [Find](https://github.com/INIT-collective/Project_Seoran/issues/8) · [Downloads](https://github.com/INIT-collective/Project_Seoran/issues/9) · [Bookmarks](https://github.com/INIT-collective/Project_Seoran/issues/10) · [Compact toolbar](https://github.com/INIT-collective/Project_Seoran/issues/11) |
+| Privacy, security and performance | Map what clearing site data removes and who updates filters and the engine. Treat isolated browsing profiles as a separate capability that needs restart and storage tests. For performance comparisons, record cold starts and the same ten-tab session on a named machine. [Data inventory](https://github.com/INIT-collective/Project_Seoran/issues/7) · [Trust boundaries](https://github.com/INIT-collective/Project_Seoran/issues/15) |
+| AI actions | Once reading and handoff prove useful, test grouping tabs or drafting a reply. Define the permission boundary and confirmation for each action. The beta workflow ends with a human-reviewed draft. [Selected-passage design](https://github.com/INIT-collective/Project_Seoran/issues/13) |
+| Markets/News | A volunteer who follows a topic daily can compare a separate source workspace with their existing bookmark routine. Record the advantage and the cost of a live feed before selecting it for a milestone. [Mode proposal](https://github.com/INIT-collective/Project_Seoran/issues/14) |
+| Tor | Establish the user need and privacy expectations first. Consider an explicit handoff to the official Tor Browser. Its project cautions that routing another browser through Tor can expose identifying information. [Tor decision](https://github.com/INIT-collective/Project_Seoran/issues/26) · [Tor Project guidance](https://support.torproject.org/tor-browser/security/using-tor-with-other-browsers/) |
 
 ## Who would maintain the engine?
 
@@ -29,12 +50,4 @@ The shell and the rendering engine are separate investments. The proposal is to 
 
 For a repeatable comparison, use one machine and the same local text, form and resource-filter fixtures. Record navigation, focus, history, blocking, cold start, package size and the steps to update the runtime. A macOS or Linux claim needs a volunteer who builds and tests on that OS. Record the measured gaps, ongoing owner and a keep, switch or revisit decision. [Engine decision](https://github.com/INIT-collective/Project_Seoran/issues/12)
 
-## Milestones and release decisions
-
-| Milestone | What the community can deliver | How it finishes |
-| --- | --- | --- |
-| M0 · Contributor setup | Publish the contribution path, run browser checks on Windows and get the authors' license decision. | A new volunteer can claim a task. A second maintainer can review a linked PR with working checks. The agreed license and notices are recorded. [M0 issues](https://github.com/INIT-collective/Project_Seoran/milestone/1) |
-| M1 · Windows preview | Start with a clean build report, keyboard walkthrough and data inventory. Then pick one everyday improvement and review the native trust boundary. Other feature candidates can move to a later milestone. | On a second machine, test navigation, tabs, bookmarks, session restore, Shield and the chosen improvement. Link the tested commit, environment, known limitations and release decision. [Preview rehearsal](https://github.com/INIT-collective/Project_Seoran/issues/16) |
-| M2 · Product experiments | Pick one engine, AI or workspace question when someone volunteers to own it. | Publish the smallest prototype or comparison, a tester's observation, and an explicit decision to proceed, revise or park it. Spin out implementation only when someone can maintain it. [M2 issues](https://github.com/INIT-collective/Project_Seoran/milestone/3) |
-
-Milestones have exit criteria and no calendar deadlines. The pinned issue is the place to recruit for active work and propose a different order. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1)
+The engine choice, additional platforms and optional modes depend on a demonstrated need and someone willing to maintain them. The milestones have exit criteria and no fixed calendar deadlines.

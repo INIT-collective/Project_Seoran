@@ -14,11 +14,15 @@ Young power users: students, developers, gamers and creators who keep the browse
 
 ## Product Purpose
 
+The proposed first audience is people who regularly answer technical questions in Discord or GitHub communities, including mod authors, project maintainers and volunteer support helpers. They can test Seoran on one real question while keeping their usual browser. [Pilot and milestones](ROADMAP.md)
+
 Seoran is an open-source desktop browser (Rust shell, Chromium engine) focused on customization, privacy, security and AI integration. Success is the team and its users switching to it as their daily browser.
 
 ## Positioning
 
-All three of these together, which no single competitor offers:
+The first product bet is a verifiable answer another community member can use. A helper collects public sources and private notes, chooses which excerpts a model may receive, and reviews a cited Markdown draft before sharing it. The recipient can check the evidence in their own browser. Test whether helpers return for a second case before investing in a wider release.
+
+The original brief also proposed these directions:
 
 - **Personality plus privacy:** Brave-level ad and tracker blocking, YouTube included, with an expressive, customizable identity instead of a corporate one.
 - **Two modes (planned):** one browser that switches between Normal browsing and a Markets/News mode.

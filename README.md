@@ -110,4 +110,4 @@ node tools/cdp.mjs seoran.chrome "S.shield"
 
 ## Next steps
 
-The proposed first preview stays on Windows and adds one everyday improvement chosen from tester reports. The engine discussion compares WebView2, CEF, a Chromium fork and independent-engine options. The roadmap also covers macOS and Linux, customization, privacy and an opt-in AI sidebar. [Roadmap and decision issues](ROADMAP.md)
+The first preview stays on Windows. The next product test is helping a community volunteer turn public sources and private troubleshooting notes into a cited answer that a teammate can verify. The roadmap covers a local notebook, optional on-device and API models, and the evidence needed for a community beta. [Product vision and milestones](ROADMAP.md)
