@@ -7,11 +7,13 @@ mod filters;
 mod nav;
 mod pages;
 mod store;
+mod tabs;
 
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     rc::Rc,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -26,8 +28,9 @@ use tao::{
 use wry::{Rect, WebContext, WebView, WebViewBuilder, http::Request};
 
 use crate::{
-    engine::{ContentSpec, TabHooks},
+    engine::ContentSpec,
     store::{SessionTab, Store},
+    tabs::{Tab, Tabs},
 };
 
 /// Height of the tab strip + toolbar, in logical pixels.
@@ -57,64 +60,54 @@ pub enum UserEvent {
     Inspect { tab: u32, x: i32, y: i32 },
 }
 
+/// Page callbacks may already be on the event queue when their WebView is dropped.
+struct QueuedEvent {
+    source: Option<Weak<()>>,
+    event: UserEvent,
+}
+
+fn source_is_live(source: &Option<Weak<()>>) -> bool {
+    source.as_ref().is_none_or(|owner| owner.strong_count() > 0)
+}
+
+impl QueuedEvent {
+    fn into_live(self) -> Option<UserEvent> {
+        source_is_live(&self.source).then_some(self.event)
+    }
+}
+
+#[derive(Clone)]
+struct EventSender {
+    queue: EventLoopProxy<QueuedEvent>,
+    source: Option<Weak<()>>,
+}
+
+impl EventSender {
+    fn for_page(&self, lifetime: &Arc<()>) -> Self {
+        Self { queue: self.queue.clone(), source: Some(Arc::downgrade(lifetime)) }
+    }
+
+    fn send(&self, event: UserEvent) {
+        let _ = self.queue.send_event(QueuedEvent { source: self.source.clone(), event });
+    }
+}
+
 const DEVTOOLS_MIN: f64 = 140.0;
 
-struct Tab {
-    id: u32,
-    webview: Option<WebView>,
-    hooks: TabHooks,
-    url: String,
-    title: String,
-    favicon: String,
-    loading: bool,
-    can_back: bool,
-    can_forward: bool,
-    last_active: Instant,
-    key_times: VecDeque<Instant>,
-    /// DevTools Protocol events already forwarded from this tab's view.
+/// Native resources for one resident tab. Dropping this entry puts its page to sleep.
+struct LivePage {
+    lifetime: Arc<()>,
+    view: WebView,
     cdp_subs: HashSet<String>,
 }
 
-impl Tab {
-    fn new(id: u32, url: &str, title: &str) -> Self {
-        Self {
-            id,
-            webview: None,
-            hooks: TabHooks::default(),
-            url: url.to_owned(),
-            title: title.to_owned(),
-            favicon: String::new(),
-            loading: false,
-            can_back: false,
-            can_forward: false,
-            last_active: Instant::now(),
-            key_times: VecDeque::new(),
-            cdp_subs: HashSet::new(),
-        }
-    }
-
-    fn display_title(&self) -> String {
-        if nav::internal_page(&self.url) == Some("newtab") {
-            return "New tab".into();
-        }
-        if !self.title.trim().is_empty() {
-            return self.title.clone();
-        }
-        shield::site_of(&self.url).unwrap_or_else(|| self.url.clone())
-    }
-
-    /// Pages may send key messages directly; cap them so a page can't spam
-    /// "open tab" and the like.
-    fn allow_key(&mut self) -> bool {
-        let now = Instant::now();
-        while self.key_times.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1)) {
-            self.key_times.pop_front();
-        }
-        if self.key_times.len() >= 8 {
-            return false;
-        }
-        self.key_times.push_back(now);
-        true
+fn register_subscription(
+    registered: &mut HashSet<String>,
+    name: String,
+    register: impl FnOnce(&str) -> windows::core::Result<()>,
+) {
+    if !registered.contains(&name) && register(&name).is_ok() {
+        registered.insert(name);
     }
 }
 
@@ -122,11 +115,11 @@ struct Browser {
     window: Window,
     chrome: WebView,
     ctx: WebContext,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: EventSender,
     shield: Rc<RefCell<Shield>>,
     store: Store,
-    tabs: Vec<Tab>,
-    active: usize,
+    tabs: Tabs,
+    pages: HashMap<u32, LivePage>,
     next_id: u32,
     closed: Vec<SessionTab>,
     /// Extra areas (menus, popovers, toasts) the UI view currently shows
@@ -207,7 +200,7 @@ fn app_icon() -> Option<Icon> {
 }
 
 impl Browser {
-    fn new(target: &EventLoopWindowTarget<UserEvent>, proxy: EventLoopProxy<UserEvent>) -> Self {
+    fn new(target: &EventLoopWindowTarget<QueuedEvent>, proxy: EventSender) -> Self {
         let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
         let profile = base.join("Seoran");
         // The browser used to be called Kite: carry an old profile over once.
@@ -215,6 +208,20 @@ impl Browser {
         if !profile.exists() && old.exists() {
             let _ = std::fs::rename(&old, &profile);
         }
+        let p_filters = proxy.clone();
+        let browser = Self::with_profile(target, proxy, profile.clone(), std::env::args().nth(1));
+        filters::spawn(profile, false, move |c| {
+            p_filters.send(UserEvent::Filters(c));
+        });
+        browser
+    }
+
+    fn with_profile(
+        target: &EventLoopWindowTarget<QueuedEvent>,
+        proxy: EventSender,
+        profile: std::path::PathBuf,
+        arg_url: Option<String>,
+    ) -> Self {
         let store = Store::open(profile.clone());
 
         let window = WindowBuilder::new()
@@ -252,7 +259,7 @@ impl Browser {
             .with_ipc_handler(move |req: Request<String>| {
                 // Only our own UI page may drive the browser.
                 if nav::internal_page(&req.uri().to_string()) == Some("chrome") {
-                    let _ = p_chrome.send_event(UserEvent::Chrome(req.into_body()));
+                    p_chrome.send(UserEvent::Chrome(req.into_body()));
                 }
             })
             .with_navigation_handler(|url| nav::internal_page(&url) == Some("chrome"))
@@ -274,8 +281,8 @@ impl Browser {
             proxy: proxy.clone(),
             shield: Rc::new(RefCell::new(shield)),
             store,
-            tabs: Vec::new(),
-            active: 0,
+            tabs: Tabs::default(),
+            pages: HashMap::new(),
             next_id: 1,
             closed: Vec::new(),
             panels: Vec::new(),
@@ -287,34 +294,23 @@ impl Browser {
         };
 
         // Restore the last session lazily: only the active tab loads now.
-        let arg_url = std::env::args().nth(1);
         let session = browser.store.load_session();
-        if browser.store.settings.restore_session && !session.tabs.is_empty() {
-            for t in &session.tabs {
-                let id = browser.alloc_id();
-                // Internal pages from before the rename.
-                let url = t.url.replace(concat!("http://k", "ite."), nav::INTERNAL_PREFIX);
-                browser.tabs.push(Tab::new(id, &url, &t.title));
-            }
-            browser.active = session.active.min(browser.tabs.len() - 1);
+        if browser.store.settings.restore_session {
+            browser.tabs = Tabs::from_session(&session, || browser.alloc_id());
         }
         if let Some(url) = arg_url {
             let url = nav::resolve_input(&url, &browser.store.settings);
             browser.open_tab(&url, true);
-        } else if browser.tabs.is_empty() {
+        } else if browser.tabs.ordered.is_empty() {
             browser.open_tab(nav::NEW_TAB_URL, true);
-        } else {
-            browser.activate(browser.active);
+        } else if let Some(i) = browser.tabs.active_index() {
+            browser.activate(i);
         }
 
         browser.apply_region();
         // Show the window only once its views exist: no blank first frame.
         browser.window.set_visible(true);
 
-        let p_filters = proxy;
-        filters::spawn(profile, false, move |c| {
-            let _ = p_filters.send_event(UserEvent::Filters(c));
-        });
         browser
     }
 
@@ -329,8 +325,8 @@ impl Browser {
         if let Some(view) = &self.devtools.view {
             let _ = view.set_background_color(bg);
         }
-        for wv in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
-            let _ = wv.set_background_color(bg);
+        for page in self.pages.values() {
+            let _ = page.view.set_background_color(bg);
         }
     }
 
@@ -397,7 +393,7 @@ impl Browser {
     fn layout(&self) {
         let _ = self.chrome.set_bounds(self.chrome_bounds());
         self.apply_region();
-        if let Some(wv) = self.tabs.get(self.active).and_then(|t| t.webview.as_ref()) {
+        if let Some(wv) = self.active_view() {
             let _ = wv.set_bounds(self.content_bounds());
         }
         if let Some(view) = &self.devtools.view {
@@ -405,24 +401,24 @@ impl Browser {
         }
     }
 
-    fn index_of(&self, id: u32) -> Option<usize> {
-        self.tabs.iter().position(|t| t.id == id)
+    fn active_view(&self) -> Option<&WebView> {
+        self.pages.get(&self.tabs.active_id()?).map(|page| &page.view)
     }
 
     fn ensure_webview(&mut self, i: usize, visible: bool) {
-        if self.tabs[i].webview.is_some() {
+        if self.pages.contains_key(&self.tabs.ordered[i].id) {
             return;
         }
         let bounds = self.content_bounds();
-        let tab = &self.tabs[i];
-        let spec = ContentSpec { tab: tab.id, url: &tab.url.clone(), bounds, visible };
+        let tab = &self.tabs.ordered[i];
+        let lifetime = Arc::new(());
+        let sender = self.proxy.for_page(&lifetime);
+        let spec = ContentSpec { tab: tab.id, url: &tab.url, bounds, visible };
         let bg = self.bg();
-        match engine::create_content(&self.window, &mut self.ctx, spec, bg, &self.proxy, &self.shield, &tab.hooks.clone()) {
+        match engine::create_content(&self.window, &mut self.ctx, spec, bg, &sender, &self.shield, &tab.hooks) {
             Ok(wv) => {
-                self.tabs[i].webview = Some(wv);
-                self.tabs[i].loading = true;
-                // A new view has none of the old one's event forwarders.
-                self.tabs[i].cdp_subs.clear();
+                self.pages.insert(tab.id, LivePage { lifetime, view: wv, cdp_subs: HashSet::new() });
+                self.tabs.ordered[i].loading = true;
                 // New views stack on top; keep the UI above the page.
                 engine::raise(&self.chrome);
             }
@@ -432,8 +428,8 @@ impl Browser {
 
     fn open_tab(&mut self, url: &str, activate: bool) {
         let id = self.alloc_id();
-        let insert_at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(insert_at.min(self.tabs.len()), Tab::new(id, url, ""));
+        let insert_at = self.tabs.active_index().map_or(0, |i| i + 1);
+        self.tabs.ordered.insert(insert_at, Tab::new(id, url, ""));
         if activate {
             self.activate(insert_at);
             if nav::internal_page(url) == Some("newtab") {
@@ -442,36 +438,31 @@ impl Browser {
         } else {
             // Background tabs (links opened in a new tab) start loading now.
             self.ensure_webview(insert_at, false);
-            if insert_at <= self.active && self.tabs.len() > 1 {
-                self.active += 1;
-            }
         }
         self.dirty = true;
     }
 
     fn activate(&mut self, i: usize) {
-        if i >= self.tabs.len() {
+        let prev = self.tabs.active_index();
+        if !self.tabs.select(i) {
             return;
         }
-        let prev = self.active;
-        self.active = i;
         self.ensure_webview(i, true);
         let bounds = self.content_bounds();
-        let tab = &mut self.tabs[i];
+        let tab = &mut self.tabs.ordered[i];
         tab.last_active = Instant::now();
         // Show the new page before hiding the old one, so there is never a
         // frame with no page at all.
-        if let Some(wv) = &tab.webview {
-            let _ = wv.set_bounds(bounds);
-            let _ = wv.set_visible(true);
-            let _ = wv.focus();
+        if let Some(page) = self.pages.get(&tab.id) {
+            let _ = page.view.set_bounds(bounds);
+            let _ = page.view.set_visible(true);
+            let _ = page.view.focus();
         }
-        if prev != i
-            && let Some(old) = self.tabs.get_mut(prev)
-        {
+        if let Some(prev) = prev.filter(|&prev| prev != i) {
+            let old = &mut self.tabs.ordered[prev];
             old.last_active = Instant::now();
-            if let Some(wv) = &old.webview {
-                let _ = wv.set_visible(false);
+            if let Some(page) = self.pages.get(&old.id) {
+                let _ = page.view.set_visible(false);
             }
         }
         self.refresh_nav(i);
@@ -483,11 +474,12 @@ impl Browser {
     }
 
     fn close_tab(&mut self, id: u32) {
-        let Some(i) = self.index_of(id) else { return };
+        let was_active = self.tabs.active_id() == Some(id);
+        let Some(tab) = self.tabs.remove(id) else { return };
+        self.pages.remove(&id);
         if self.devtools.tab == Some(id) {
             self.devtools.tab = None;
         }
-        let tab = self.tabs.remove(i);
         if nav::internal_page(&tab.url).is_none_or(|p| p != "newtab") {
             self.closed.push(SessionTab { url: tab.url.clone(), title: tab.title.clone() });
             if self.closed.len() > 25 {
@@ -498,20 +490,13 @@ impl Browser {
                 json!({ "text": format!("Closed “{}”", tab.display_title()), "action": "reopen", "actionLabel": "Undo" }),
             );
         }
-        drop(tab);
-        if self.tabs.is_empty() {
-            self.active = 0;
-            self.open_tab(nav::NEW_TAB_URL, true);
-            return;
-        }
-        let next = if i < self.active || (i == self.active && i == self.tabs.len()) {
-            self.active.saturating_sub(1)
+        if !was_active {
+            self.dirty = true;
+        } else if let Some(next) = self.tabs.active_index() {
+            self.activate(next);
         } else {
-            self.active.min(self.tabs.len() - 1)
-        };
-        // The previous active tab is gone; nothing to hide.
-        self.active = next;
-        self.activate(next);
+            self.open_tab(nav::NEW_TAB_URL, true);
+        }
     }
 
     fn reopen_closed(&mut self) {
@@ -521,54 +506,46 @@ impl Browser {
     }
 
     fn move_tab(&mut self, id: u32, to: usize) {
-        let Some(from) = self.index_of(id) else { return };
-        let to = to.min(self.tabs.len() - 1);
-        if from == to {
-            return;
+        if self.tabs.move_to(id, to) {
+            self.dirty = true;
         }
-        let active_id = self.tabs[self.active].id;
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        self.active = self.index_of(active_id).unwrap_or(0);
-        self.dirty = true;
     }
 
     fn navigate(&mut self, input: &str) {
         let url = nav::resolve_input(input, &self.store.settings);
-        let i = self.active;
-        if self.tabs.is_empty() {
+        let Some(i) = self.tabs.active_index() else {
             self.open_tab(&url, true);
             return;
-        }
-        self.tabs[i].url = url.clone();
-        match &self.tabs[i].webview {
-            Some(wv) => {
-                let _ = wv.load_url(&url);
-                let _ = wv.focus();
+        };
+        self.tabs.ordered[i].url = url.clone();
+        match self.pages.get(&self.tabs.ordered[i].id) {
+            Some(page) => {
+                let _ = page.view.load_url(&url);
+                let _ = page.view.focus();
             }
             None => self.ensure_webview(i, true),
         }
-        self.tabs[i].loading = true;
+        self.tabs.ordered[i].loading = true;
         self.dirty = true;
     }
 
     fn refresh_nav(&mut self, i: usize) {
-        if let Some(tab) = self.tabs.get_mut(i)
-            && let Some(wv) = &tab.webview {
-                let s = engine::nav_state(wv);
+        if let Some(tab) = self.tabs.ordered.get_mut(i)
+            && let Some(page) = self.pages.get(&tab.id) {
+                let s = engine::nav_state(&page.view);
                 tab.can_back = s.can_back;
                 tab.can_forward = s.can_forward;
             }
     }
 
     fn update_window_title(&self) {
-        if let Some(t) = self.tabs.get(self.active) {
+        if let Some(t) = self.active_tab() {
             self.window.set_title(&format!("{} — Seoran", t.display_title()));
         }
     }
 
     fn active_tab(&self) -> Option<&Tab> {
-        self.tabs.get(self.active)
+        self.tabs.ordered.get(self.tabs.active_index()?)
     }
 
     // ---- talking to the UI -------------------------------------------------
@@ -579,8 +556,8 @@ impl Browser {
     }
 
     fn page_reply(&self, tab: u32, msg: Value) {
-        if let Some(wv) = self.index_of(tab).and_then(|i| self.tabs[i].webview.as_ref()) {
-            let _ = wv.evaluate_script(&format!("window.__seoranReceive && __seoranReceive({msg})"));
+        if let Some(page) = self.pages.get(&tab) {
+            let _ = page.view.evaluate_script(&format!("window.__seoranReceive && __seoranReceive({msg})"));
         }
     }
 
@@ -590,17 +567,8 @@ impl Browser {
         let url = active.map(|t| t.url.as_str()).unwrap_or("");
         let site = shield::site_of(url).filter(|_| !nav::is_internal(url));
         json!({
-            "tabs": self.tabs.iter().map(|t| json!({
-                "id": t.id,
-                "title": t.display_title(),
-                "url": nav::display_url(&t.url),
-                "loading": t.loading,
-                "blocked": t.hooks.blocked.get(),
-                "favicon": t.favicon,
-                "internal": nav::is_internal(&t.url),
-                "sleeping": t.webview.is_none(),
-            })).collect::<Vec<_>>(),
-            "active": active.map(|t| t.id),
+            "tabs": self.tabs.ordered.iter().map(|t| t.chrome_state(self.pages.contains_key(&t.id))).collect::<Vec<_>>(),
+            "active": self.tabs.active_id(),
             "url": nav::display_url(url),
             "secure": url.starts_with("https://"),
             "internal": nav::is_internal(url),
@@ -659,8 +627,8 @@ impl Browser {
             } else { "Open address".into() },
         }));
         let ql = q.to_lowercase();
-        for t in &self.tabs {
-            if t.id != self.active_tab().map(|a| a.id).unwrap_or(0)
+        for t in &self.tabs.ordered {
+            if Some(t.id) != self.tabs.active_id()
                 && (t.title.to_lowercase().contains(&ql) || t.url.to_lowercase().contains(&ql))
             {
                 items.push(json!({ "kind": "tab", "title": t.display_title(), "url": nav::display_url(&t.url), "tabId": t.id, "sub": "Switch to tab" }));
@@ -688,14 +656,17 @@ impl Browser {
         match action {
             "newTab" => self.open_tab(nav::NEW_TAB_URL, true),
             "closeTab" => {
-                if let Some(id) = self.active_tab().map(|t| t.id) {
+                if let Some(id) = self.tabs.active_id() {
                     self.close_tab(id);
                 }
             }
             "reopen" => self.reopen_closed(),
-            "nextTab" if !self.tabs.is_empty() => self.activate((self.active + 1) % self.tabs.len()),
-            "prevTab" if !self.tabs.is_empty() => {
-                self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
+            "nextTab" | "prevTab" => {
+                if let Some(i) = self.tabs.active_index() {
+                    let count = self.tabs.ordered.len();
+                    let step = if action == "nextTab" { 1 } else { count - 1 };
+                    self.activate((i + step) % count);
+                }
             }
             "focusOmnibox" => {
                 let _ = self.chrome.focus();
@@ -707,7 +678,7 @@ impl Browser {
             }
             "bookmark" => self.toggle_bookmark(),
             "reload" => {
-                if let Some(wv) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+                if let Some(wv) = self.active_view() {
                     let _ = wv.reload();
                 }
             }
@@ -722,13 +693,13 @@ impl Browser {
             "devtoolsConsole" => self.open_devtools(Some(json!({ "view": "console" }))),
             "devtoolsPick" => self.open_devtools(Some(json!({ "view": "elements", "pick": true }))),
             "devtoolsAdvanced" => {
-                if let Some(wv) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+                if let Some(wv) = self.active_view() {
                     engine::open_devtools(wv);
                 }
             }
             a if a.starts_with("tab:") => {
                 if let Ok(n) = a[4..].parse::<usize>() {
-                    let i = if n == 9 { self.tabs.len().saturating_sub(1) } else { n.saturating_sub(1) };
+                    let i = if n == 9 { self.tabs.ordered.len().saturating_sub(1) } else { n.saturating_sub(1) };
                     self.activate(i);
                 }
             }
@@ -767,12 +738,12 @@ impl Browser {
     }
 
     fn focus_content(&self) {
-        if let Some(wv) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+        if let Some(wv) = self.active_view() {
             let _ = wv.focus();
         }
     }
 
-    fn handle_chrome(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>, flow: &mut ControlFlow) {
+    fn handle_chrome(&mut self, body: &str, target: &EventLoopWindowTarget<QueuedEvent>, flow: &mut ControlFlow) {
         let Ok(msg) = serde_json::from_str::<Value>(body) else { return };
         let id = msg["id"].as_u64().map(|v| v as u32);
         match msg["t"].as_str().unwrap_or("") {
@@ -791,7 +762,7 @@ impl Browser {
                 }
             }
             "activate" => {
-                if let Some(i) = id.and_then(|id| self.index_of(id)) {
+                if let Some(i) = id.and_then(|id| self.tabs.index_of(id)) {
                     self.activate(i);
                 }
             }
@@ -802,7 +773,7 @@ impl Browser {
             }
             "navigate" => self.navigate(msg["input"].as_str().unwrap_or("")),
             "back" | "forward" | "stop" => {
-                if let Some(wv) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+                if let Some(wv) = self.active_view() {
                     match msg["t"].as_str() {
                         Some("back") => engine::go_back(wv),
                         Some("forward") => engine::go_forward(wv),
@@ -890,15 +861,15 @@ impl Browser {
     fn update_filters(&mut self) {
         let p = self.proxy.clone();
         filters::spawn(self.store.dir().to_path_buf(), true, move |c| {
-            let _ = p.send_event(UserEvent::Filters(c));
+            p.send(UserEvent::Filters(c));
         });
     }
 
     fn handle_content(&mut self, tab: u32, origin: &str, body: &str) {
         let Ok(msg) = serde_json::from_str::<Value>(body) else { return };
-        let Some(i) = self.index_of(tab) else { return };
+        let Some(i) = self.tabs.index_of(tab) else { return };
         if msg["t"] == "key" {
-            if self.tabs[i].allow_key() {
+            if self.tabs.ordered[i].allow_key() {
                 let a = msg["a"].as_str().unwrap_or("").to_owned();
                 self.handle_action(&a);
             }
@@ -906,7 +877,7 @@ impl Browser {
         }
         // Everything else is only for our own internal pages.
         let Some(page) = nav::internal_page(origin) else { return };
-        if !nav::is_internal(&self.tabs[i].url) {
+        if !nav::is_internal(&self.tabs.ordered[i].url) {
             return;
         }
         match msg["t"].as_str().unwrap_or("") {
@@ -916,7 +887,7 @@ impl Browser {
             }
             "navigate" => {
                 let input = msg["input"].as_str().unwrap_or("").to_owned();
-                if self.tabs[self.active].id == tab {
+                if self.tabs.active_id() == Some(tab) {
                     self.navigate(&input);
                 }
             }
@@ -994,9 +965,9 @@ impl Browser {
     /// Tell every open seoran:// page and the DevTools panel the new look.
     fn broadcast_look(&self) {
         let js = format!("window.__seoranLook && __seoranLook({})", self.look());
-        for t in &self.tabs {
-            if let (true, Some(wv)) = (nav::is_internal(&t.url), &t.webview) {
-                let _ = wv.evaluate_script(&js);
+        for t in &self.tabs.ordered {
+            if nav::is_internal(&t.url) && let Some(page) = self.pages.get(&t.id) {
+                let _ = page.view.evaluate_script(&js);
             }
         }
         if let Some(view) = &self.devtools.view {
@@ -1036,24 +1007,25 @@ impl Browser {
         }
     }
 
-    fn handle(&mut self, ev: UserEvent, target: &EventLoopWindowTarget<UserEvent>, flow: &mut ControlFlow) {
-        match ev {
+    fn handle(&mut self, message: QueuedEvent, target: &EventLoopWindowTarget<QueuedEvent>, flow: &mut ControlFlow) {
+        let Some(event) = message.into_live() else { return };
+        match event {
             UserEvent::Chrome(body) => self.handle_chrome(&body, target, flow),
             UserEvent::Content { tab, origin, body } => self.handle_content(tab, &origin, &body),
             UserEvent::Title(tab, title) => {
-                if let Some(i) = self.index_of(tab) {
-                    let url = self.tabs[i].url.clone();
+                if let Some(i) = self.tabs.index_of(tab) {
+                    let url = self.tabs.ordered[i].url.clone();
                     self.store.set_title(&url, &title);
-                    self.tabs[i].title = title;
-                    if i == self.active {
+                    self.tabs.ordered[i].title = title;
+                    if self.tabs.active_id() == Some(tab) {
                         self.update_window_title();
                     }
                     self.dirty = true;
                 }
             }
             UserEvent::Load { tab, started, url } => {
-                if let Some(i) = self.index_of(tab) {
-                    let t = &mut self.tabs[i];
+                if let Some(i) = self.tabs.index_of(tab) {
+                    let t = &mut self.tabs.ordered[i];
                     t.loading = started;
                     if !url.is_empty() {
                         t.url = url;
@@ -1067,20 +1039,20 @@ impl Browser {
                 }
             }
             UserEvent::NavStarting { tab, url } => {
-                if let Some(i) = self.index_of(tab) {
-                    self.tabs[i].loading = true;
+                if let Some(i) = self.tabs.index_of(tab) {
+                    self.tabs.ordered[i].loading = true;
                     if !nav::is_internal(&url) {
-                        self.tabs[i].favicon.clear();
+                        self.tabs.ordered[i].favicon.clear();
                     }
                     self.dirty = true;
                 }
             }
             UserEvent::Url { tab, url } => {
-                if let Some(i) = self.index_of(tab) {
-                    let spa = !self.tabs[i].loading && self.tabs[i].url != url;
-                    self.tabs[i].url = url.clone();
+                if let Some(i) = self.tabs.index_of(tab) {
+                    let spa = !self.tabs.ordered[i].loading && self.tabs.ordered[i].url != url;
+                    self.tabs.ordered[i].url = url.clone();
                     if spa {
-                        let title = self.tabs[i].title.clone();
+                        let title = self.tabs.ordered[i].title.clone();
                         self.store.record_visit(&url, &title);
                     }
                     self.refresh_nav(i);
@@ -1088,14 +1060,14 @@ impl Browser {
                 }
             }
             UserEvent::History(tab) => {
-                if let Some(i) = self.index_of(tab) {
+                if let Some(i) = self.tabs.index_of(tab) {
                     self.refresh_nav(i);
                     self.dirty = true;
                 }
             }
             UserEvent::Favicon { tab, url } => {
-                if let Some(i) = self.index_of(tab) {
-                    self.tabs[i].favicon = url;
+                if let Some(i) = self.tabs.index_of(tab) {
+                    self.tabs.ordered[i].favicon = url;
                     self.dirty = true;
                 }
             }
@@ -1122,8 +1094,8 @@ impl Browser {
                 }
             }
             UserEvent::Inspect { tab, x, y } => {
-                if let Some(i) = self.index_of(tab) {
-                    if i != self.active {
+                if let Some(i) = self.tabs.index_of(tab) {
+                    if self.tabs.active_id() != Some(tab) {
                         self.activate(i);
                     }
                     self.open_devtools(Some(json!({ "view": "elements", "inspectAt": { "x": x, "y": y } })));
@@ -1148,7 +1120,7 @@ impl Browser {
             .with_custom_protocol("seoran".into(), |_id, req| engine::serve_internal(req))
             .with_ipc_handler(move |req: Request<String>| {
                 if nav::internal_page(&req.uri().to_string()) == Some("devtools") {
-                    let _ = p.send_event(UserEvent::DevTools(req.into_body()));
+                    p.send(UserEvent::DevTools(req.into_body()));
                 }
             })
             .with_navigation_handler(|url| nav::internal_page(&url) == Some("devtools"))
@@ -1205,9 +1177,9 @@ impl Browser {
     /// Stop the old tab's instrumentation so it runs at full speed again.
     fn devtools_detach(&mut self) {
         let Some(old) = self.devtools.tab.take() else { return };
-        if let Some(wv) = self.index_of(old).and_then(|i| self.tabs[i].webview.as_ref()) {
+        if let Some(page) = self.pages.get(&old) {
             for m in ["Overlay.hideHighlight", "Overlay.disable", "Network.disable", "CSS.disable", "DOM.disable", "Log.disable", "Runtime.disable"] {
-                engine::cdp_call(wv, m, "{}", |_, _| {});
+                engine::cdp_call(&page.view, m, "{}", |_, _| {});
             }
         }
     }
@@ -1226,9 +1198,9 @@ impl Browser {
         }
     }
 
-    fn devtools_webview(&self) -> Option<&WebView> {
+    fn devtools_page(&self) -> Option<&LivePage> {
         let id = self.devtools.tab?;
-        self.index_of(id).and_then(|i| self.tabs[i].webview.as_ref())
+        self.pages.get(&id)
     }
 
     fn handle_devtools(&mut self, body: &str) {
@@ -1251,13 +1223,15 @@ impl Browser {
                 let id = msg["id"].as_u64().unwrap_or(0);
                 let method = msg["method"].as_str().unwrap_or("").to_owned();
                 let params = if msg["params"].is_object() { msg["params"].to_string() } else { "{}".into() };
-                let p = self.proxy.clone();
-                match self.devtools_webview() {
-                    Some(wv) => engine::cdp_call(wv, &method, &params, move |ok, json| {
-                        let _ = p.send_event(UserEvent::CdpResult { id, ok, json });
-                    }),
+                match self.devtools_page() {
+                    Some(page) => {
+                        let sender = self.proxy.for_page(&page.lifetime);
+                        engine::cdp_call(&page.view, &method, &params, move |ok, json| {
+                            sender.send(UserEvent::CdpResult { id, ok, json });
+                        });
+                    }
                     None => {
-                        let _ = p.send_event(UserEvent::CdpResult {
+                        self.proxy.send(UserEvent::CdpResult {
                             id,
                             ok: false,
                             json: json!({ "message": "This tab is asleep. Switch to it to wake it up." }).to_string(),
@@ -1267,21 +1241,18 @@ impl Browser {
             }
             "subscribe" => {
                 let Some(id) = self.devtools.tab else { return };
-                let Some(i) = self.index_of(id) else { return };
+                let Some(page) = self.pages.get_mut(&id) else { return };
                 let events: Vec<String> = msg["events"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
                     .unwrap_or_default();
-                let tab = &mut self.tabs[i];
-                let Some(wv) = tab.webview.as_ref() else { return };
                 for name in events {
-                    if !tab.cdp_subs.insert(name.clone()) {
-                        continue;
-                    }
-                    let p = self.proxy.clone();
-                    let n = name.clone();
-                    engine::cdp_subscribe(wv, &name, move |json| {
-                        let _ = p.send_event(UserEvent::CdpEvent { tab: id, name: n.clone(), json });
+                    register_subscription(&mut page.cdp_subs, name, |name| {
+                        let sender = self.proxy.for_page(&page.lifetime);
+                        let event_name = name.to_owned();
+                        engine::cdp_subscribe(&page.view, name, move |json| {
+                            sender.send(UserEvent::CdpEvent { tab: id, name: event_name.clone(), json });
+                        })
                     });
                 }
             }
@@ -1300,7 +1271,7 @@ impl Browser {
             "shieldSite" => {
                 let on = msg["on"].as_bool().unwrap_or(true);
                 let body = json!({ "t": "shieldSite", "on": on }).to_string();
-                self.proxy.send_event(UserEvent::Chrome(body)).ok();
+                self.proxy.send(UserEvent::Chrome(body));
             }
             _ => {}
         }
@@ -1308,7 +1279,7 @@ impl Browser {
 
     /// What the shield did on the inspected page.
     fn shield_report(&self) -> Value {
-        let Some(tab) = self.devtools.tab.and_then(|id| self.index_of(id)).map(|i| &self.tabs[i]) else {
+        let Some(tab) = self.devtools.tab.and_then(|id| self.tabs.index_of(id)).map(|i| &self.tabs.ordered[i]) else {
             return json!({});
         };
         let shield = self.shield.borrow();
@@ -1342,8 +1313,9 @@ impl Browser {
         self.save_session();
         let limit = Duration::from_secs(self.store.settings.sleep_tabs_after_min.max(1) * 60);
         let mut slept = false;
-        for (i, tab) in self.tabs.iter_mut().enumerate() {
-            if i == self.active || tab.webview.is_none() || tab.last_active.elapsed() < limit {
+        let active = self.tabs.active_id();
+        for tab in &mut self.tabs.ordered {
+            if Some(tab.id) == active || tab.last_active.elapsed() < limit {
                 continue;
             }
             if self.devtools.open && self.devtools.tab == Some(tab.id) {
@@ -1352,10 +1324,11 @@ impl Browser {
             if self.store.settings.sleep_tabs_after_min == 0 {
                 continue;
             }
-            if tab.webview.as_ref().is_some_and(engine::playing_audio) {
+            let Some(page) = self.pages.get(&tab.id) else { continue };
+            if engine::playing_audio(&page.view) {
                 continue;
             }
-            tab.webview = None;
+            self.pages.remove(&tab.id);
             tab.loading = false;
             slept = true;
         }
@@ -1365,11 +1338,7 @@ impl Browser {
     }
 
     fn save_session(&self) {
-        let session = store::Session {
-            tabs: self.tabs.iter().map(|t| SessionTab { url: t.url.clone(), title: t.title.clone() }).collect(),
-            active: self.active,
-        };
-        self.store.save_session(&session);
+        self.store.save_session(&self.tabs.session());
     }
 
     fn shutdown(&mut self) {
@@ -1381,8 +1350,8 @@ impl Browser {
 }
 
 fn main() {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
+    let event_loop = EventLoopBuilder::<QueuedEvent>::with_user_event().build();
+    let proxy = EventSender { queue: event_loop.create_proxy(), source: None };
     let mut browser: Option<Browser> = Some(Browser::new(&event_loop, proxy));
 
     event_loop.run(move |event, target, flow| {
@@ -1394,7 +1363,7 @@ fn main() {
                     b.maintenance();
                 }
             }
-            Event::UserEvent(ev) => b.handle(ev, target, flow),
+            Event::UserEvent(message) => b.handle(message, target, flow),
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     b.layout();
@@ -1419,3 +1388,6 @@ fn main() {
         }
     });
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
