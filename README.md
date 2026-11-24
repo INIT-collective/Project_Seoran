@@ -35,7 +35,15 @@ tools/                dev tools: window capture, DevTools Protocol driver
 
 ### How the UI works
 
-The browser UI is a small web page (`seoran://chrome`) that covers the whole window above each tab's page. A native window region clips it to the toolbar plus any open menu, so menus draw over the live page without hiding, resizing or repainting it. The UI renders state pushed from Rust and sends intents back over IPC.
+The browser UI is a small web page (`seoran://chrome`) that covers the whole window above each tab's page. A native window region clips it to the toolbar, the optional tab rail and any open menu, so menus draw over the live page without hiding, resizing or repainting it. The UI renders state pushed from Rust and sends intents back over IPC.
+
+### Try live tab placement (Windows experiment)
+
+Open the menu and choose **Move tabs to the left**. Choose **Move tabs to the top** to restore the default. Both commands also appear in the command palette. The active page and docked DevTools stay open. Drag tabs along the strip or rail to reorder them.
+
+The menu saves the choice to `%LOCALAPPDATA%\Seoran\layout.json`. To try the declarative path, save `{"tabs":"left"}` or `{"tabs":"top"}` in that file, then run **Reload tab layout from file** in the command palette. A missing file selects top tabs. An invalid file or a failed save returns the running window to top tabs and leaves the pages intact. A successful menu change replaces the file.
+
+For the continuity check, use a disposable Windows profile with top tabs selected. Start the debug build with the loopback DevTools port described in `tools/cdp.mjs`, then run `node tools/layout-continuity.mjs` with Node 22 or later. It opens a loopback page, starts a quiet tone, and checks the same page across 100 menu switches. The native geometry, recovery and session checks run with `cargo test --locked -p seoran windows_tab_lifecycle -- --ignored`.
 
 ### Seoran DevTools
 

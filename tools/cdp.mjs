@@ -8,7 +8,7 @@ export async function pages() {
   return (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
 }
 
-export async function connect(match) {
+export async function connect(match, onEvent) {
   const list = await pages();
   const page = list.find((p) => p.type === 'page' && p.url.includes(match));
   if (!page) throw new Error(`no page matching ${match}: ${list.map((p) => p.url).join(', ')}`);
@@ -18,6 +18,7 @@ export async function connect(match) {
   const waiting = new Map();
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+    if (msg.method) onEvent?.(msg.method, msg.params);
     if (msg.id && waiting.has(msg.id)) {
       const { ok, fail } = waiting.get(msg.id);
       waiting.delete(msg.id);

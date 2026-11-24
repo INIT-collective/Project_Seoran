@@ -502,7 +502,7 @@ pub fn playing_audio(webview: &WebView) -> bool {
 }
 
 /// The native window that hosts a webview (wry's container window).
-fn host_window(webview: &WebView) -> Option<windows::Win32::Foundation::HWND> {
+pub(super) fn host_window(webview: &WebView) -> Option<windows::Win32::Foundation::HWND> {
     let mut hwnd = windows::Win32::Foundation::HWND::default();
     unsafe { webview.controller().ParentWindow(&mut hwnd).ok()? };
     (!hwnd.is_invalid()).then_some(hwnd)
@@ -535,24 +535,40 @@ pub struct RegionRect {
 /// there, and the page beneath stays live and clickable everywhere else.
 /// Changing the region needs no resize or repaint of either view, so
 /// opening a menu can't make the page flicker.
-pub fn set_region(webview: &WebView, rects: &[RegionRect]) {
+pub fn set_region(webview: &WebView, rects: &[RegionRect]) -> std::io::Result<()> {
     use windows::Win32::Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_OR, SetWindowRgn,
+        CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_ERROR, RGN_OR, SetWindowRgn,
     };
-    let Some(hwnd) = host_window(webview) else { return };
+    let hwnd = host_window(webview).ok_or_else(|| std::io::Error::other("missing chrome window"))?;
     unsafe {
         let region = CreateRectRgn(0, 0, 0, 0);
+        if region.is_invalid() {
+            return Err(std::io::Error::other("could not create chrome region"));
+        }
         for r in rects {
             let part = if r.r > 0 {
                 CreateRoundRectRgn(r.x, r.y, r.x + r.w + 1, r.y + r.h + 1, r.r * 2, r.r * 2)
             } else {
                 CreateRectRgn(r.x, r.y, r.x + r.w, r.y + r.h)
             };
-            CombineRgn(Some(region), Some(region), Some(part), RGN_OR);
+            if part.is_invalid() {
+                let _ = DeleteObject(region.into());
+                return Err(std::io::Error::other("could not create chrome region segment"));
+            }
+            let combined = CombineRgn(Some(region), Some(region), Some(part), RGN_OR);
             let _ = DeleteObject(part.into());
+            if combined == RGN_ERROR {
+                let _ = DeleteObject(region.into());
+                return Err(std::io::Error::other("could not combine chrome regions"));
+            }
         }
-        // The window owns the region after this call.
-        SetWindowRgn(hwnd, Some(region), true);
+        // The window takes ownership only on success.
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = DeleteObject(region.into());
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

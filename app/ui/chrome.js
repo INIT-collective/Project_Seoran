@@ -80,7 +80,7 @@ window.__mono = monogram;
 function renderTabs() {
   const box = $('#tabs');
   const seen = new Set();
-  for (const t of S.tabs) {
+  for (const [index, t] of S.tabs.entries()) {
     seen.add(t.id);
     let el = tabEls.get(t.id);
     if (!el) {
@@ -103,7 +103,7 @@ function renderTabs() {
     el.classList.toggle('loading', t.loading && !t.sleeping);
     el.classList.toggle('sleeping', t.sleeping && t.id !== S.active);
     el.setAttribute('aria-selected', t.id === S.active);
-    box.appendChild(el);
+    if (box.children[index] !== el) box.insertBefore(el, box.children[index] || null);
   }
   for (const [id, el] of tabEls) {
     if (!seen.has(id)) { el.remove(); tabEls.delete(id); }
@@ -113,7 +113,7 @@ function renderTabs() {
 
 function fitTabs() {
   const each = $('#tabs').clientWidth / Math.max(1, S.tabs.length);
-  for (const el of tabEls.values()) el.classList.toggle('narrow', each < 76);
+  for (const el of tabEls.values()) el.classList.toggle('narrow', S.tabPosition === 'top' && each < 76);
 }
 new ResizeObserver(() => S && fitTabs()).observe(document.body);
 
@@ -161,7 +161,7 @@ function renderToolbar() {
   applyLook(S);
 
   if (open === 'shield') renderShield();
-  if (open === 'menu' && $('#menu')._look !== `${S.theme}|${S.plastic}`) renderMenu();
+  if (open === 'menu' && $('#menu')._look !== `${S.theme}|${S.plastic}|${S.tabPosition}`) renderMenu();
 }
 
 function applyLook({ theme, plastic }) {
@@ -239,11 +239,19 @@ const PLASTICS = [
   ['strawberry', 'Strawberry', '#dc2259'],
   ['graphite', 'Graphite', '#303038'],
 ];
+function layoutLabel() {
+  return S.tabPosition === 'left' ? 'Move tabs to the top' : 'Move tabs to the left';
+}
+
+function switchLayout() {
+  send({ t: 'setLayout', layout: { tabs: S.tabPosition === 'left' ? 'top' : 'left' } });
+}
+
 function renderMenu() {
   const item = (a, ic, label, key = '', disabled = false) =>
     `<button class="mi" role="menuitem" data-a="${a}" ${disabled ? 'disabled' : ''}>${icon(ic)}<span>${label}</span>${key ? `<kbd>${key}</kbd>` : ''}</button>`;
   const current = S.plastic || 'grape';
-  $('#menu')._look = `${S.theme}|${S.plastic}`;
+  $('#menu')._look = `${S.theme}|${S.plastic}|${S.tabPosition}`;
   $('#menu').innerHTML = [
     `<div class="plastics"><div class="plastics-label">Plastic</div><div class="swatches" role="radiogroup" aria-label="Plastic colour">${
       PLASTICS.map(([id, name, hex]) => `<button class="swatch" role="radio" aria-checked="${id === current}" data-plastic="${id}" title="${name}" aria-label="${name}" style="--sw:${hex}"></button>`).join('')
@@ -254,6 +262,7 @@ function renderMenu() {
     '<div class="sep"></div>',
     item('bookmark', S.bookmarked ? 'starFill' : 'star', S.bookmarked ? 'Remove bookmark' : 'Bookmark page', 'Ctrl D', S.internal),
     item('palette', 'sparkle', 'Command palette', 'Ctrl K'),
+    item('switchLayout', 'tab', layoutLabel()),
     item('theme', S.theme === 'dark' ? 'moon' : 'sun', `Theme: ${themeLabel[S.theme] || 'System'}`),
     '<div class="sep"></div>',
     item('settings', 'settings', 'Settings', 'Ctrl ,'),
@@ -269,7 +278,8 @@ $('#menu').addEventListener('click', (e) => {
   const a = b.dataset.a;
   if (a === 'theme') { cycleTheme(); return; }
   closePanels();
-  if (a === 'palette') openPanel('palette');
+  if (a === 'switchLayout') { $('#menu-btn').focus(); switchLayout(); }
+  else if (a === 'palette') openPanel('palette');
   else send({ t: 'action', a });
 });
 $('#menu-btn').addEventListener('click', () => (open === 'menu' ? closePanels() : openPanel('menu')));
@@ -290,31 +300,43 @@ $('#tabs').addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   const id = Number(tab.dataset.id);
   if (id !== S.active) send({ t: 'activate', id });
-  drag = { id, el: tab, x0: e.clientX, moved: false, pointer: e.pointerId };
+  const vertical = S.tabPosition === 'left';
+  drag = { id, el: tab, vertical, start: vertical ? e.clientY : e.clientX, moved: false, pointer: e.pointerId };
   tab.setPointerCapture(e.pointerId);
 });
 
 $('#tabs').addEventListener('pointermove', (e) => {
-  if (!drag) return;
-  const dx = e.clientX - drag.x0;
-  if (!drag.moved && Math.abs(dx) < 5) return;
+  if (!drag || drag.pointer !== e.pointerId) return;
+  const delta = (drag.vertical ? e.clientY : e.clientX) - drag.start;
+  if (!drag.moved && Math.abs(delta) < 5) return;
   drag.moved = true;
   drag.el.classList.add('dragging');
-  drag.el.style.transform = `translateX(${dx}px)`;
+  drag.el.style.transform = `translate${drag.vertical ? 'Y' : 'X'}(${delta}px)`;
 });
 
 $('#tabs').addEventListener('pointerup', (e) => {
-  if (!drag) return;
+  if (!drag || drag.pointer !== e.pointerId) return;
   const d = drag;
   drag = null;
   if (!d.moved) return;
-  const mid = d.el.getBoundingClientRect().left + d.el.offsetWidth / 2;
+  const center = (el) => {
+    const r = el.getBoundingClientRect();
+    return d.vertical ? r.top + r.height / 2 : r.left + r.width / 2;
+  };
+  const mid = center(d.el);
   const others = [...$('#tabs').children].filter((el) => el !== d.el);
-  let to = others.findIndex((el) => mid < el.getBoundingClientRect().left + el.offsetWidth / 2);
+  let to = others.findIndex((el) => mid < center(el));
   if (to === -1) to = others.length;
   d.el.classList.remove('dragging');
   d.el.style.transform = '';
   send({ t: 'moveTab', id: d.id, to });
+});
+
+$('#tabs').addEventListener('lostpointercapture', (e) => {
+  if (drag?.pointer !== e.pointerId) return;
+  drag.el.classList.remove('dragging');
+  drag.el.style.transform = '';
+  drag = null;
 });
 
 $('#tabs').addEventListener('auxclick', (e) => {
@@ -459,6 +481,8 @@ function commands() {
     { a: 'shieldSite', label: sh.siteActive ? `Turn shield off for ${sh.site}` : `Turn shield on for ${sh.site}`, ic: sh.siteActive ? 'shieldOff' : 'shieldCheck', off: !sh.site },
     { a: 'shieldGlobal', label: sh.enabled ? 'Turn shield off everywhere' : 'Turn shield on everywhere', ic: 'shield' },
     { a: 'updateFilters', label: 'Update shield filter lists', ic: 'download' },
+    { a: 'switchLayout', label: layoutLabel(), ic: 'tab' },
+    { a: 'reloadLayout', label: 'Reload tab layout from file', ic: 'reload' },
     { a: 'theme', label: `Switch theme (now ${themeLabel[S.theme] || 'System'})`, ic: 'moon' },
     ...PLASTICS.filter(([id]) => id !== (S.plastic || 'grape')).map(([id, name]) => ({ a: `plastic:${id}`, label: `Plastic: ${name}`, ic: 'sparkle' })),
     { a: 'settings', label: 'Open settings', ic: 'settings', key: 'Ctrl ,' },
@@ -520,6 +544,8 @@ function runPalette(it) {
   if (it.kind === 'go') send({ t: 'navigate', input: it.label });
   else if (it.kind === 'tab') send({ t: 'activate', id: it.id });
   else if (it.kind === 'url') send({ t: 'navigate', input: it.url });
+  else if (it.a === 'switchLayout') { $('#menu-btn').focus(); switchLayout(); }
+  else if (it.a === 'reloadLayout') { $('#menu-btn').focus(); send({ t: 'reloadLayout' }); }
   else if (it.a === 'theme') cycleTheme();
   else if (it.a.startsWith('plastic:')) send({ t: 'plastic', value: it.a.slice(8) });
   else if (it.a === 'shieldSite') send({ t: 'shieldSite', on: !S.shield.siteActive });
@@ -608,8 +634,21 @@ window.addEventListener('contextmenu', (e) => {
 // ---- API for the shell ------------------------------------------------------------------
 window.seoran = {
   state(s) {
+    const layoutChanged = S?.tabPosition !== s.tabPosition;
+    const selectionChanged = S?.active !== s.active;
     S = s;
+    if (layoutChanged) {
+      const root = document.documentElement;
+      root.dataset.tabs = s.tabPosition;
+      root.style.setProperty('--chrome-height', s.chromeHeight + 'px');
+      root.style.setProperty('--rail-width', s.railWidth + 'px');
+      $('#tabs').setAttribute('aria-orientation', s.tabPosition === 'left' ? 'vertical' : 'horizontal');
+    }
     render();
+    if (layoutChanged || selectionChanged) {
+      tabEls.get(s.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+    if (layoutChanged) repositionPanels();
   },
   focusOmnibox() {
     closePanels();
@@ -639,6 +678,12 @@ window.seoran = {
 };
 
 // Keep the clip region in step with the window and panel sizes.
-new ResizeObserver(() => { lastPanels = ''; syncOverlay(); }).observe(document.documentElement);
+function repositionPanels() {
+  if (open === 'menu') anchor('#menu', $('#menu-btn'), 'right');
+  if (open === 'shield') anchor('#shield-pop', $('#shield'), 'right');
+  if (open === 'suggest') renderSuggest();
+  syncOverlay();
+}
+new ResizeObserver(repositionPanels).observe(document.documentElement);
 
 send({ t: 'ready' });
