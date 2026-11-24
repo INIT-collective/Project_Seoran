@@ -1,0 +1,27 @@
+name: Report a browser problem
+description: Share one reproducible problem using a test page or disposable profile.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "For a potential vulnerability use [private reporting](https://github.com/INIT-collective/Project_Seoran/security/advisories/new). Remove personal URLs and profile data from public evidence."
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Start with the smallest ordinary browsing interaction that shows the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Build and environment
+      placeholder: Commit or build, Windows version, WebView2 version if known
+    validations:
+      required: true

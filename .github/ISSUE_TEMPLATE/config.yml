@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Join an existing task
+    url: https://github.com/INIT-collective/Project_Seoran/issues/1
+    about: Pick a ready issue, ask for a partner or offer to review.
+  - name: Report a security vulnerability privately
+    url: https://github.com/INIT-collective/Project_Seoran/security/advisories/new
+    about: Share sensitive findings with repository maintainers.

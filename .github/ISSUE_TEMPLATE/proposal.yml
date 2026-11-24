@@ -1,0 +1,26 @@
+name: Propose a task or product decision
+description: Shape a small contribution or discuss an open product choice.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Who needs this and what are they trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: slice
+    attributes:
+      label: First step and completion criteria
+      description: Give one result another contributor could test or review.
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Options and ongoing work
+      description: For an engine, privacy or provider decision, include alternatives, update responsibilities and what would change your recommendation.
+  - type: input
+    id: help
+    attributes:
+      label: How would you like to help?
+      placeholder: Implement, design, test, review, or share a use case

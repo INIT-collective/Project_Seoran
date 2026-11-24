@@ -1,6 +1,10 @@
 # Seoran
 
-An open-source browser focused on speed, privacy and customization. Rust shell, Chromium engine, ad and tracker blocking built in. ("Seoran" is a working name.)
+Seoran is a general-purpose desktop browser from INIT:// focused on deep customization, privacy, security and optional AI. The working Windows prototype uses Rust and WebView2 and includes ad and tracker blocking. The project aims to be open source. The original rights holders are discussing licensing for external contributions and distribution. [License decision](https://github.com/INIT-collective/Project_Seoran/issues/4)
+
+## Join the project
+
+Try one Windows build, test one keyboard interaction, or trace one privacy setting. The pinned welcome issue lists the current openings. [Start here](https://github.com/INIT-collective/Project_Seoran/issues/1) · [Contribution guide](CONTRIBUTING.md) · [Product roadmap](ROADMAP.md)
 
 ## Status
 
@@ -17,7 +21,7 @@ Phase 1 base:
 ```
 app/                  the browser (binary "seoran")
   src/main.rs         browser core: tabs, events, messages between UI and engine
-  src/engine.rs       engine layer: WebView2 today, swappable for CEF or Servo
+  src/engine.rs       Windows engine integration using WebView2
   src/filters.rs      filter-list download, compile and cache (worker thread)
   src/store.rs        settings, history, bookmarks, session (JSON in the profile)
   src/nav.rs          address-bar input to URL, and URL to display text
@@ -51,7 +55,7 @@ YouTube serves ads from its own domain, so blocking by domain alone doesn't stop
 
 ## Build and run (Windows)
 
-You need Rust (stable, MSVC toolchain) and the WebView2 runtime, which is built into Windows 10 and 11.
+You need stable Rust with the MSVC toolchain, the Visual Studio C++ build tools with a Windows SDK, and the WebView2 Runtime. If the runtime is missing on your Windows installation, install the Evergreen Runtime. [Microsoft's runtime guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/evergreen-vs-fixed-version)
 
 ```powershell
 cargo run -p seoran
@@ -74,7 +78,8 @@ cargo test --workspace
 Scriptlet behavior test (Node 18 or newer):
 
 ```powershell
-cargo run -q -p shield --example dump_script -- https://www.youtube.com/watch?v=x > $env:TEMP\yt.js; node crates/shield/tests/scriptlets.test.mjs $env:TEMP\yt.js
+cargo run --locked -q -p shield --example dump_script -- 'https://www.youtube.com/watch?v=x' | Out-File -Encoding utf8 "$env:TEMP\yt.js"
+if ($LASTEXITCODE -eq 0) { node crates/shield/tests/scriptlets.test.mjs "$env:TEMP\yt.js" }
 ```
 
 To drive a running Seoran from scripts, start it with a DevTools port:
@@ -103,9 +108,6 @@ node tools/cdp.mjs seoran.chrome "S.shield"
 | Ctrl Shift J | DevTools console |
 | Ctrl Shift C | Pick an element to inspect |
 
-## Next steps (see the roadmap)
+## Next steps
 
-- Replace WebView2 with CEF behind `engine.rs` (needs CMake and the Windows SDK).
-- macOS and Linux builds.
-- Downloads UI, find in page, bookmarks manager.
-- AI sidebar (Phase 3).
+The current architecture experiment tests whether tab controls can be rearranged or replaced while the page stays live. A second contributor will be needed to validate the authoring contract. [Roadmap and open decisions](ROADMAP.md)
