@@ -32,6 +32,83 @@ fn subscriptions_retry_failed_registration_and_deduplicate_success() {
     register_subscription(&mut names, event.into(), |_| panic!("registered twice on the same WebView"));
 }
 
+/// Check which side of each native boundary receives input, including after resize.
+fn check_chrome_edges(browser: &Browser, x: i32, y: i32) {
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion, RGN_ERROR};
+    let hwnd = engine::host_window(&browser.chrome).unwrap();
+    unsafe {
+        let region = CreateRectRgn(0, 0, 0, 0);
+        assert!(!region.is_invalid());
+        let kind = GetWindowRgn(hwnd, region);
+        let header = PtInRegion(region, x + 1, y - 1).as_bool();
+        let content = PtInRegion(region, x, y).as_bool();
+        let rail = PtInRegion(region, x - 1, y + 1).as_bool();
+        let _ = DeleteObject(region.into());
+        assert_ne!(kind, RGN_ERROR);
+        assert!(header);
+        assert!(!content);
+        assert_eq!(rail, x > 0);
+    }
+}
+
+fn exercise_live_layout(browser: &mut Browser, events: &EventLoopWindowTarget<QueuedEvent>, first: u32, background: u32) {
+    use crate::layout::TabPosition::{Left, Top};
+
+    let foreground_page = Arc::downgrade(&browser.pages[&first].lifetime);
+    let background_page = Arc::downgrade(&browser.pages[&background].lifetime);
+    let dir = browser.store.dir().to_owned();
+    let file = dir.join("layout.json");
+    let mut flow = ControlFlow::Wait;
+    let left = r#"{"t":"setLayout","layout":{"tabs":"left"}}"#;
+    let top = r#"{"t":"setLayout","layout":{"tabs":"top"}}"#;
+    browser.handle_content(first, "https://example.org", left);
+    browser.handle_content(first, "https://example.org", r#"{"t":"key","a":"setLayout"}"#);
+    assert_eq!(browser.tab_layout.tabs, Top);
+    assert!(!file.exists());
+
+    for i in 0..100 {
+        if i == 50 {
+            browser.window.set_inner_size(LogicalSize::new(520.0, 360.0));
+        }
+        let (msg, expected) = if i % 2 == 0 { (left, Left) } else { (top, Top) };
+        browser.handle_chrome(msg, events, &mut flow);
+        assert_eq!(browser.tab_layout.tabs, expected);
+        assert_eq!(Layout::read(&dir).unwrap().tabs, expected);
+        assert_eq!(browser.pages.len(), 2);
+        assert!(foreground_page.ptr_eq(&Arc::downgrade(&browser.pages[&first].lifetime)));
+        assert!(background_page.ptr_eq(&Arc::downgrade(&browser.pages[&background].lifetime)));
+        assert_eq!(browser.tabs.active_id(), Some(first));
+        assert_eq!(browser.devtools.tab, Some(first));
+        assert_eq!(browser.tabs.ordered[1].id, background);
+        let scale = browser.window.scale_factor();
+        let rail = if expected == Left { 184.0 } else { 0.0 };
+        let header = if expected == Left { 46.0 } else { 88.0 };
+        let page = browser.active_view().unwrap().bounds().unwrap();
+        let dock = browser.devtools.view.as_ref().unwrap().bounds().unwrap();
+        let page_at = page.position.to_physical::<i32>(scale);
+        let dock_at = dock.position.to_physical::<i32>(scale);
+        assert_eq!(page_at.x, (rail * scale).round() as i32);
+        assert_eq!(page_at.y, (header * scale).round() as i32);
+        check_chrome_edges(browser, page_at.x, page_at.y);
+        assert_eq!(dock_at.x, page_at.x);
+        assert!((dock_at.y - page_at.y - page.size.to_physical::<i32>(scale).height).abs() <= 1);
+    }
+
+    std::fs::write(&file, r#"{"tabs":"left"}"#).unwrap();
+    browser.handle_chrome(r#"{"t":"reloadLayout"}"#, events, &mut flow);
+    assert_eq!(browser.tab_layout.tabs, Left);
+    std::fs::write(&file, r#"{"tabs":"bottom"}"#).unwrap();
+    browser.handle_chrome(r#"{"t":"reloadLayout"}"#, events, &mut flow);
+    assert_eq!(browser.tab_layout.tabs, Top);
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap(); // Force the atomic replacement to fail.
+    browser.handle_chrome(left, events, &mut flow);
+    assert_eq!(browser.tab_layout.tabs, Top);
+    assert!(foreground_page.ptr_eq(&Arc::downgrade(&browser.pages[&first].lifetime)));
+    std::fs::remove_dir(&file).unwrap();
+    browser.handle_chrome(left, events, &mut flow);
+}
+
 #[test]
 #[ignore = "requires a Windows desktop and the WebView2 runtime"]
 fn windows_tab_lifecycle() {
@@ -57,6 +134,8 @@ fn windows_tab_lifecycle() {
     assert_eq!(browser.pages[&background].cdp_subs.len(), 1);
     browser.activate(0);
     assert_eq!(browser.devtools.tab, Some(first));
+    exercise_live_layout(&mut browser, &events, first, background);
+
     let title_event = |title: &str| UserEvent::Title(background, title.into());
     let before_sleep = queued_from(&browser.pages[&background], title_event("retired title"));
     let before_wake = queued_from(&browser.pages[&background], title_event("retired title"));
@@ -97,6 +176,7 @@ fn windows_tab_lifecycle() {
     browser.shutdown();
     drop(browser);
     let mut restored = Browser::with_profile(&events, sender, profile, None);
+    assert_eq!(restored.tab_layout.tabs, layout::TabPosition::Left);
     let active = restored.tabs.active_id().unwrap();
     let other = restored.tabs.ordered[0].id;
     assert_eq!(restored.tabs.active_index(), Some(1));

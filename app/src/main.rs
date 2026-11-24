@@ -4,6 +4,7 @@
 
 mod engine;
 mod filters;
+mod layout;
 mod nav;
 mod pages;
 mod store;
@@ -29,12 +30,11 @@ use wry::{Rect, WebContext, WebView, WebViewBuilder, http::Request};
 
 use crate::{
     engine::ContentSpec,
+    layout::Layout,
     store::{SessionTab, Store},
     tabs::{Tab, Tabs},
 };
 
-/// Height of the tab strip + toolbar, in logical pixels.
-const TOP: f64 = 88.0;
 const MAINTENANCE_EVERY: Duration = Duration::from_secs(30);
 const FLUSH_EVERY: Duration = Duration::from_millis(80);
 
@@ -118,6 +118,7 @@ struct Browser {
     proxy: EventSender,
     shield: Rc<RefCell<Shield>>,
     store: Store,
+    tab_layout: Layout,
     tabs: Tabs,
     pages: HashMap<u32, LivePage>,
     next_id: u32,
@@ -223,6 +224,10 @@ impl Browser {
         arg_url: Option<String>,
     ) -> Self {
         let store = Store::open(profile.clone());
+        let tab_layout = Layout::read(&profile).unwrap_or_else(|e| {
+            eprintln!("[seoran] using the default tab layout: {e}");
+            Layout::default()
+        });
 
         let window = WindowBuilder::new()
             .with_title("Seoran")
@@ -281,6 +286,7 @@ impl Browser {
             proxy: proxy.clone(),
             shield: Rc::new(RefCell::new(shield)),
             store,
+            tab_layout,
             tabs: Tabs::default(),
             pages: HashMap::new(),
             next_id: 1,
@@ -307,7 +313,7 @@ impl Browser {
             browser.activate(i);
         }
 
-        browser.apply_region();
+        browser.layout();
         // Show the window only once its views exist: no blank first frame.
         browser.window.set_visible(true);
 
@@ -331,11 +337,16 @@ impl Browser {
     }
 
     /// Clip the UI view to the toolbar plus open panels.
-    fn apply_region(&self) {
+    fn apply_region(&self) -> std::io::Result<()> {
         let scale = self.window.scale_factor();
         let s = self.logical_size();
         let px = |v: f64| (v * scale).round() as i32;
-        let mut rects = vec![engine::RegionRect { x: 0, y: 0, w: px(s.width), h: px(TOP), r: 0 }];
+        let header = px(self.tab_layout.header_height());
+        let rail = px(self.tab_layout.rail_width());
+        let mut rects = vec![engine::RegionRect { x: 0, y: 0, w: px(s.width), h: header, r: 0 }];
+        if rail > 0 {
+            rects.push(engine::RegionRect { x: 0, y: header, w: rail, h: (px(s.height) - header).max(0), r: 0 });
+        }
         rects.extend(self.panels.iter().map(|p| engine::RegionRect {
             x: px(p[0]),
             y: px(p[1]),
@@ -343,7 +354,7 @@ impl Browser {
             h: px(p[3]),
             r: px(p[4]),
         }));
-        engine::set_region(&self.chrome, &rects);
+        engine::set_region(&self.chrome, &rects)
     }
 
     fn alloc_id(&mut self) -> u32 {
@@ -361,24 +372,27 @@ impl Browser {
         if !self.devtools.open {
             return 0.0;
         }
-        let room = self.logical_size().height - TOP - 80.0;
+        let room = self.logical_size().height - self.tab_layout.header_height() - 80.0;
         self.devtools.height.min(room).max(DEVTOOLS_MIN.min(room)).max(0.0)
     }
 
     fn content_bounds(&self) -> Rect {
         let s = self.logical_size();
+        let header = self.tab_layout.header_height();
+        let rail = self.tab_layout.rail_width();
         Rect {
-            position: LogicalPosition::new(0.0, TOP).into(),
-            size: LogicalSize::new(s.width, (s.height - TOP - self.devtools_height()).max(1.0)).into(),
+            position: LogicalPosition::new(rail, header).into(),
+            size: LogicalSize::new((s.width - rail).max(1.0), (s.height - header - self.devtools_height()).max(1.0)).into(),
         }
     }
 
     fn devtools_bounds(&self) -> Rect {
         let s = self.logical_size();
         let h = self.devtools_height();
+        let rail = self.tab_layout.rail_width();
         Rect {
-            position: LogicalPosition::new(0.0, s.height - h).into(),
-            size: LogicalSize::new(s.width, h.max(1.0)).into(),
+            position: LogicalPosition::new(rail, s.height - h).into(),
+            size: LogicalSize::new((s.width - rail).max(1.0), h.max(1.0)).into(),
         }
     }
 
@@ -391,14 +405,39 @@ impl Browser {
     }
 
     fn layout(&self) {
-        let _ = self.chrome.set_bounds(self.chrome_bounds());
-        self.apply_region();
+        if let Err(error) = self.apply_bounds() {
+            eprintln!("[seoran] layout: {error}");
+        }
+    }
+
+    fn apply_bounds(&self) -> wry::Result<()> {
+        self.chrome.set_bounds(self.chrome_bounds())?;
         if let Some(wv) = self.active_view() {
-            let _ = wv.set_bounds(self.content_bounds());
+            wv.set_bounds(self.content_bounds())?;
         }
         if let Some(view) = &self.devtools.view {
-            let _ = view.set_bounds(self.devtools_bounds());
+            view.set_bounds(self.devtools_bounds())?;
         }
+        self.apply_region()?;
+        Ok(())
+    }
+
+    fn change_layout(&mut self, candidate: std::io::Result<Layout>, save: bool) {
+        let result = candidate.and_then(|layout| {
+            self.tab_layout = layout;
+            self.apply_bounds().map_err(std::io::Error::other)?;
+            if save {
+                layout.save(self.store.dir())?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            eprintln!("[seoran] tab layout: {error}");
+            self.tab_layout = Layout::default();
+            self.layout();
+            self.chrome_call("toast", json!({ "text": "Could not apply the tab layout. Using top tabs." }));
+        }
+        self.chrome_call("state", self.state_json());
     }
 
     fn active_view(&self) -> Option<&WebView> {
@@ -569,6 +608,9 @@ impl Browser {
         json!({
             "tabs": self.tabs.ordered.iter().map(|t| t.chrome_state(self.pages.contains_key(&t.id))).collect::<Vec<_>>(),
             "active": self.tabs.active_id(),
+            "tabPosition": self.tab_layout.tabs,
+            "chromeHeight": self.tab_layout.header_height(),
+            "railWidth": self.tab_layout.rail_width(),
             "url": nav::display_url(url),
             "secure": url.starts_with("https://"),
             "internal": nav::is_internal(url),
@@ -733,7 +775,9 @@ impl Browser {
             .unwrap_or_default();
         if panels != self.panels {
             self.panels = panels;
-            self.apply_region();
+            if let Err(error) = self.apply_region() {
+                eprintln!("[seoran] chrome clipping: {error}");
+            }
         }
     }
 
@@ -816,6 +860,8 @@ impl Browser {
                     .collect();
                 self.chrome_call("historyResults", json!({ "seq": msg["seq"], "items": items }));
             }
+            "setLayout" => self.change_layout(serde_json::from_value(msg["layout"].clone()).map_err(Into::into), true),
+            "reloadLayout" => self.change_layout(Layout::read(self.store.dir()), false),
             "panels" => self.set_panels(&msg["rects"]),
             "focusContent" => self.focus_content(),
             "theme" => {

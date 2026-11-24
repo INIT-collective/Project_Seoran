@@ -11,7 +11,7 @@ body {
 
 #bar {
   position: relative;
-  height: 88px;
+  height: var(--chrome-height, 88px);
   background: var(--plastic) var(--mold);
   color: var(--plastic-ink);
   box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.2);
@@ -442,12 +442,48 @@ body {
   min-width: 0.62em;
 }
 
+/* The same tab nodes and controls occupy the left rail in this layout. */
+:root[data-tabs="left"] #bar {
+  display: flex;
+  align-items: center;
+  padding-left: 6px;
+}
+:root[data-tabs="left"] #tabrow { display: contents; }
+:root[data-tabs="left"] #drag { flex: 0 0 24px; min-width: 0; }
+:root[data-tabs="left"] #toolbar { flex: 1; min-width: 0; }
+:root[data-tabs="left"] #omnibox { min-width: 0; }
+:root[data-tabs="left"] #wincontrols { order: 1; margin: 0; }
+:root[data-tabs="left"] #tabs {
+  position: fixed;
+  inset: var(--chrome-height) auto 40px 0;
+  width: var(--rail-width);
+  height: auto;
+  padding: 6px 5px;
+  flex-direction: column;
+  overflow: hidden auto;
+  scrollbar-width: thin;
+  background: var(--plastic) var(--mold);
+  border-right: 1px solid var(--plastic-hover);
+}
+:root[data-tabs="left"] .tab { width: 100%; flex: 0 0 32px; }
+:root[data-tabs="left"] .tab::before { display: none; }
+:root[data-tabs="left"] #newtab {
+  position: fixed;
+  bottom: 4px;
+  left: 5px;
+  width: calc(var(--rail-width) - 11px);
+  background: var(--plastic);
+}
+@media (max-width: 640px) {
+  :root[data-tabs="left"] #wincontrols button { width: 34px; }
+}
+
 /* ---- panels over the page ----------------------------------------------
    The view is clipped to these boxes: opaque inserts with a plastic rim
    along the top, no shadows outside. */
 #layer {
   position: fixed;
-  inset: 88px 0 0 0;
+  inset: var(--chrome-height, 88px) 0 0;
   pointer-events: none;
 }
 
@@ -652,6 +688,8 @@ body {
 
 /* menu */
 #menu {
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
   width: 264px;
   padding: 4px;
 }
